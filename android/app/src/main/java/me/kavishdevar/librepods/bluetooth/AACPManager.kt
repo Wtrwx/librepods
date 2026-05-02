@@ -215,7 +215,7 @@ class AACPManager {
         identifier: ControlCommandIdentifiers, value: ByteArray
     ) {
         val existingStatus = getControlCommandStatus(identifier)
-        if (existingStatus?.value.contentEquals(value)) {
+        if (existingStatus != null) {
             controlCommandStatusList.remove(existingStatus)
         }
         controlCommandListeners[identifier]?.forEach { listener ->
