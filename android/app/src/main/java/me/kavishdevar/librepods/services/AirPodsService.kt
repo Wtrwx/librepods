@@ -664,6 +664,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         connectionReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == AirPodsNotifications.AIRPODS_CONNECTION_DETECTED) {
+                    if (::socket.isInitialized && socket.isConnected) {
+                        Log.d(TAG, "Connection broadcast received but socket already connected, ignoring")
+                        return
+                    }
+
                     device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         intent.getParcelableExtra("device", BluetoothDevice::class.java)!!
                     } else {
@@ -2388,6 +2393,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     @Suppress("ClassName")
     private object bluetoothReceiver : BroadcastReceiver() {
+        private fun sendDetected(context: Context?, name: String?, device: BluetoothDevice) {
+            val intent = Intent(AirPodsNotifications.AIRPODS_CONNECTION_DETECTED)
+            intent.putExtra("name", name)
+            intent.putExtra("device", device)
+            context?.sendBroadcast(intent)
+        }
+
         @SuppressLint("MissingPermission")
         override fun onReceive(context: Context?, intent: Intent) {
             val bluetoothDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -2404,13 +2416,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             if (bluetoothDevice != null && !action.isNullOrEmpty()) {
                 Log.d(TAG, "Received bluetooth connection broadcast: action=$action")
                 val uuid = ParcelUuid.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a")
-
                 if (BluetoothDevice.ACTION_ACL_CONNECTED == action) {
                     if (bluetoothDevice.uuids?.contains(uuid) == true) {
-                        val intent = Intent(AirPodsNotifications.AIRPODS_CONNECTION_DETECTED)
-                        intent.putExtra("name", name)
-                        intent.putExtra("device", bluetoothDevice)
-                        context?.sendBroadcast(intent)
+                        sendDetected(context, name, bluetoothDevice)
                     } else {
                         bluetoothDevice.fetchUuidsWithSdp()
                     }
@@ -2420,10 +2428,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     val matchedByMac = savedMac.isNotEmpty() && bluetoothDevice.address == savedMac
                     val matchedByUuid = bluetoothDevice.uuids?.contains(uuid) == true
                     if (matchedByUuid || matchedByMac) {
-                        val intent = Intent(AirPodsNotifications.AIRPODS_CONNECTION_DETECTED)
-                        intent.putExtra("name", name)
-                        intent.putExtra("device", bluetoothDevice)
-                        context?.sendBroadcast(intent)
+                        sendDetected(context, name, bluetoothDevice)
                     }
                 }
             }
@@ -2636,7 +2641,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     @SuppressLint("MissingPermission", "UnspecifiedRegisterReceiverFlag")
     fun connectToSocket(
-        adapter: BluetoothAdapter, device: BluetoothDevice, manual: Boolean = false
+        adapter: BluetoothAdapter, device: BluetoothDevice, manual: Boolean = false, retriesLeft: Int = if (manual) 0 else 3
     ) {
         if (BluetoothConnectionManager.aacpSocket != null && BluetoothConnectionManager.aacpSocket?.isConnected == true) return
         Log.d(TAG, "<LogCollector:Start> Connecting to socket")
@@ -2716,6 +2721,15 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         Log.d(
                             TAG, "<LogCollector:Complete:Failed> Socket not connected, ${e.message}"
                         )
+                        if (retriesLeft > 0) {
+                            Log.d(TAG, "Retrying socket connect, $retriesLeft attempts left")
+                            try { socket.close() } catch (_: Exception) {}
+                            CoroutineScope(Dispatchers.IO).launch {
+                                delay(500L)
+                                connectToSocket(adapter, device, manual, retriesLeft - 1)
+                            }
+                            return@withTimeout
+                        }
                         if (manual) {
                             sendToast(
                                 "Couldn't connect to socket: ${e.localizedMessage}"
@@ -2729,7 +2743,16 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 }
             }
             if (!socket.isConnected) {
-                Log.d(TAG, "<LogCollector:Complete:Failed> socket not connected")
+                Log.d(TAG, "<LogCollector:Complete:Failed> Socket not connected")
+                if (retriesLeft > 0) {
+                    Log.d(TAG, "Retrying socket connect after timeout, $retriesLeft attempts left")
+                    try { socket.close() } catch (_: Exception) {}
+                    CoroutineScope(Dispatchers.IO).launch {
+                        delay(500L)
+                        connectToSocket(adapter, device, manual, retriesLeft - 1)
+                    }
+                    return
+                }
                 if (manual) {
                     sendToast(
                         "Couldn't connect to socket: timeout."
