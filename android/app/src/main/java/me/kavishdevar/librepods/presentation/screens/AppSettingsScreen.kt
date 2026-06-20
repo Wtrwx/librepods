@@ -190,7 +190,7 @@ fun AppSettingsScreen(
             label = stringResource(R.string.use_material3e),
             checked = state.m3eEnabled,
             onCheckedChange = viewModel::setm3eEnabled,
-//                enabled = state.isPremium
+            enabled = state.isPremium
         )
 
         if (state.connectionSuccessful) {
