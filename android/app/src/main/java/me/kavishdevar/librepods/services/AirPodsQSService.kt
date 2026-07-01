@@ -215,7 +215,7 @@ class AirPodsQSService : TileService() {
         } else {
             tile.state = Tile.STATE_UNAVAILABLE
             tile.label = "AirPods"
-            tile.subtitle = "Disconnected"
+            tile.subtitle = getString(R.string.takeover_disconnected)
             tile.icon = Icon.createWithResource(this, R.drawable.airpods)
         }
 

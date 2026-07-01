@@ -77,6 +77,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -588,7 +589,7 @@ fun NewControlCenterDialogContent(
                                 ) {
                                     Icon(
                                         painter = painterResource(id = R.drawable.airpods),
-                                        contentDescription = "Conversational Awareness",
+                                        contentDescription = stringResource(R.string.conversational_awareness),
                                         tint = Color.White,
                                         modifier = Modifier.size(32.dp)
                                     )
@@ -597,7 +598,7 @@ fun NewControlCenterDialogContent(
                                 Spacer(modifier = Modifier.height(8.dp))
 
                                 Text(
-                                    text = "Conversational\nAwareness",
+                                    text = stringResource(R.string.conversational_awareness_short),
                                     color = Color.White,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium,
@@ -613,7 +614,7 @@ fun NewControlCenterDialogContent(
         } else {
             Spacer(modifier = Modifier.weight(1f))
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text("Loading...", color = textColor)
+                Text(stringResource(R.string.loading), color = textColor)
             }
             Spacer(modifier = Modifier.weight(1f))
         }

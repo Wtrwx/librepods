@@ -66,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
@@ -541,7 +542,7 @@ fun EqualizerCard(
                             modifier = Modifier.weight(1f)
                         ) {
                             Text(
-                                text = "Low".uppercase(),
+                                text = stringResource(R.string.eq_low).uppercase(),
                                 style = TextStyle(
                                     fontSize = 14.sp,
                                     fontFamily = FontFamily(Font(R.font.sf_pro)),
@@ -558,7 +559,7 @@ fun EqualizerCard(
                             modifier = Modifier.weight(1f)
                         ) {
                             Text(
-                                text = "Mid".uppercase(),
+                                text = stringResource(R.string.eq_mid).uppercase(),
                                 style = TextStyle(
                                     fontSize = 14.sp,
                                     fontFamily = FontFamily(Font(R.font.sf_pro)),
@@ -575,7 +576,7 @@ fun EqualizerCard(
                             modifier = Modifier.weight(1f)
                         ) {
                             Text(
-                                text = "High".uppercase(),
+                                text = stringResource(R.string.eq_high).uppercase(),
                                 style = TextStyle(
                                     fontSize = 14.sp,
                                     fontFamily = FontFamily(Font(R.font.sf_pro)),

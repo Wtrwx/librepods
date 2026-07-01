@@ -277,6 +277,8 @@ private fun Plot() {
     val maxPoints = 100
     val points = remember { mutableStateListOf<Pair<Float, Float>>() }
     val darkTheme = isSystemInDarkTheme()
+    val horizontalLabel = stringResource(R.string.horizontal)
+    val verticalLabel = stringResource(R.string.vertical)
 
     var maxAbs by remember { mutableFloatStateOf(1000f) }
 
@@ -387,7 +389,7 @@ private fun Plot() {
                         textSize = 12.sp.toPx()
                         textAlign = Paint.Align.LEFT
                     }
-                    drawText("Horizontal", width - 140.dp.toPx(), textOffsetY, paint)
+                    drawText(horizontalLabel, width - 140.dp.toPx(), textOffsetY, paint)
                 }
 
                 drawCircle(verticalColor, 5.dp.toPx(), Offset(width - 70.dp.toPx(), legendY))
@@ -397,7 +399,7 @@ private fun Plot() {
                         textSize = 12.sp.toPx()
                         textAlign = Paint.Align.LEFT
                     }
-                    drawText("Vertical", width - 60.dp.toPx(), textOffsetY, paint)
+                    drawText(verticalLabel, width - 60.dp.toPx(), textOffsetY, paint)
                 }
             }
         }
