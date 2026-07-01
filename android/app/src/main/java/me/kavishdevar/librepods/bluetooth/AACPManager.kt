@@ -193,6 +193,8 @@ class AACPManager {
     var audioSource: AudioSource? = null
         private set
 
+    var fallbackOtherDeviceMacs: List<String> = listOf()
+
     var eqData = FloatArray(8)
         private set
 
@@ -855,6 +857,18 @@ class AACPManager {
         return opcode + buffer.array()
     }
 
+    private fun otherDeviceMacs(selfMacAddress: String): List<String> {
+        val fromAudioSource = audioSource
+            ?.takeIf { it.type != AudioSourceType.NONE && !it.mac.equals(selfMacAddress, ignoreCase = true) }
+            ?.mac
+        val fromConnectedDevices = (connectedDevices + oldConnectedDevices)
+            .map { it.mac }
+
+        return (listOfNotNull(fromAudioSource) + fromConnectedDevices + fallbackOtherDeviceMacs)
+            .filter { it.isNotBlank() && !it.equals(selfMacAddress, ignoreCase = true) }
+            .distinctBy { it.uppercase() }
+    }
+
     fun sendHijackRequest(selfMacAddress: String): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
             // throw IllegalArgumentException("MAC address must be 6 bytes")
@@ -862,11 +876,9 @@ class AACPManager {
             return false
         }
         var success = false
-        for (connectedDevice in connectedDevices) {
-            if (connectedDevice.mac != selfMacAddress) {
-                Log.d(TAG, "Sending Hijack Request packet to ${connectedDevice.mac}")
-                success = sendDataPacket(createHijackRequestPacket(connectedDevice.mac)) || success
-            }
+        for (targetMac in otherDeviceMacs(selfMacAddress)) {
+            Log.d(TAG, "Sending Hijack Request packet to $targetMac")
+            success = sendDataPacket(createHijackRequestPacket(targetMac)) || success
         }
         return success
     }
@@ -905,7 +917,7 @@ class AACPManager {
             return false
         }
         Log.d(TAG, "SELFMAC: $selfMacAddress")
-        val targetMac = connectedDevices.find { it.mac != selfMacAddress }?.mac
+        val targetMac = otherDeviceMacs(selfMacAddress).firstOrNull()
         if (targetMac == null) {
             Log.w(TAG, "Cannot send Media Information packet: No connected device found")
             return false
@@ -962,7 +974,7 @@ class AACPManager {
             return false
         }
 
-        val targetMac = connectedDevices.find { it.mac != selfMacAddress }?.mac
+        val targetMac = otherDeviceMacs(selfMacAddress).firstOrNull()
         if (targetMac == null) {
             Log.w(TAG, "Cannot send Smart Routing Show UI packet: No connected device found")
             return false
@@ -1001,11 +1013,9 @@ class AACPManager {
 
     fun sendHijackReversed(selfMacAddress: String): Boolean {
         var success = false
-        for (connectedDevice in connectedDevices) {
-            if (connectedDevice.mac != selfMacAddress) {
-                Log.d(TAG, "Sending Hijack Reversed packet to ${connectedDevice.mac}")
-                success = sendDataPacket(createHijackReversedPacket(connectedDevice.mac)) || success
-            }
+        for (targetMac in otherDeviceMacs(selfMacAddress)) {
+            Log.d(TAG, "Sending Hijack Reversed packet to $targetMac")
+            success = sendDataPacket(createHijackReversedPacket(targetMac)) || success
         }
         return success
     }
