@@ -193,6 +193,8 @@ class AACPManager {
     var audioSource: AudioSource? = null
         private set
 
+    var fallbackOtherDeviceMacs: List<String> = listOf()
+
     var eqData = FloatArray(8)
         private set
 
@@ -215,7 +217,7 @@ class AACPManager {
         identifier: ControlCommandIdentifiers, value: ByteArray
     ) {
         val existingStatus = getControlCommandStatus(identifier)
-        if (existingStatus?.value.contentEquals(value)) {
+        if (existingStatus != null) {
             controlCommandStatusList.remove(existingStatus)
         }
         controlCommandListeners[identifier]?.forEach { listener ->
@@ -832,11 +834,11 @@ class AACPManager {
         )
         buffer.put(byteArrayOf(0x6C, 0x00))
         buffer.put(byteArrayOf(0x01, 0xE5.toByte(), 0x4A))
-        buffer.put("playingApp".toByteArray())
+        buffer.put("PlayingApp".toByteArray())
         buffer.put(0x42)
         buffer.put("NA".toByteArray())
         buffer.put(0x52)
-        buffer.put("hostStreamingState".toByteArray())
+        buffer.put("HostStreamingState".toByteArray())
         buffer.put(0x42)
         buffer.put("NO".toByteArray())
         buffer.put(0x49)
@@ -855,6 +857,18 @@ class AACPManager {
         return opcode + buffer.array()
     }
 
+    private fun otherDeviceMacs(selfMacAddress: String): List<String> {
+        val fromAudioSource = audioSource
+            ?.takeIf { it.type != AudioSourceType.NONE && !it.mac.equals(selfMacAddress, ignoreCase = true) }
+            ?.mac
+        val fromConnectedDevices = (connectedDevices + oldConnectedDevices)
+            .map { it.mac }
+
+        return (listOfNotNull(fromAudioSource) + fromConnectedDevices + fallbackOtherDeviceMacs)
+            .filter { it.isNotBlank() && !it.equals(selfMacAddress, ignoreCase = true) }
+            .distinctBy { it.uppercase() }
+    }
+
     fun sendHijackRequest(selfMacAddress: String): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
             // throw IllegalArgumentException("MAC address must be 6 bytes")
@@ -862,11 +876,9 @@ class AACPManager {
             return false
         }
         var success = false
-        for (connectedDevice in connectedDevices) {
-            if (connectedDevice.mac != selfMacAddress) {
-                Log.d(TAG, "Sending Hijack Request packet to ${connectedDevice.mac}")
-                success = sendDataPacket(createHijackRequestPacket(connectedDevice.mac)) || success
-            }
+        for (targetMac in otherDeviceMacs(selfMacAddress)) {
+            Log.d(TAG, "Sending Hijack Request packet to $targetMac")
+            success = sendDataPacket(createHijackRequestPacket(targetMac)) || success
         }
         return success
     }
@@ -898,28 +910,35 @@ class AACPManager {
         return opcode + buffer.array()
     }
 
-    fun sendMediaInformataion(selfMacAddress: String, streamingState: Boolean = false): Boolean {
+    fun sendMediaInformataion(
+        selfMacAddress: String,
+        streamingState: Boolean = false,
+        audioCategory: AudioSourceType = if (streamingState) AudioSourceType.MEDIA else AudioSourceType.NONE
+    ): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
             // throw IllegalArgumentException("MAC address must be 6 bytes")
             Log.d(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
             return false
         }
         Log.d(TAG, "SELFMAC: $selfMacAddress")
-        val targetMac = connectedDevices.find { it.mac != selfMacAddress }?.mac
+        val targetMac = otherDeviceMacs(selfMacAddress).firstOrNull()
         if (targetMac == null) {
             Log.w(TAG, "Cannot send Media Information packet: No connected device found")
             return false
         }
-        Log.d(TAG, "Sending Media Information packet to $targetMac")
+        Log.d(TAG, "Sending Media Information packet to $targetMac, streamingState=$streamingState, audioCategory=${audioCategory.name}")
         return sendDataPacket(
             createMediaInformationPacket(
-                selfMacAddress, targetMac, streamingState
+                selfMacAddress, targetMac, streamingState, audioCategory
             )
         )
     }
 
     fun createMediaInformationPacket(
-        selfMacAddress: String, targetMacAddress: String, streamingState: Boolean = true
+        selfMacAddress: String,
+        targetMacAddress: String,
+        streamingState: Boolean = true,
+        audioCategory: AudioSourceType = if (streamingState) AudioSourceType.MEDIA else AudioSourceType.NONE
     ): ByteArray {
         val opcode = byteArrayOf(Opcodes.SMART_ROUTING, 0x00)
         val buffer = ByteBuffer.allocate(138)
@@ -950,7 +969,7 @@ class AACPManager {
         buffer.put(0x58) // 'X'
         buffer.put("otherDevice".toByteArray())
         buffer.put("AudioCategory".toByteArray())
-        buffer.put(byteArrayOf(0x31, 0x2D, 0x01))
+        buffer.put(byteArrayOf((0x30 + audioCategory.value).toByte(), 0x2D, 0x01))
 
         return opcode + buffer.array()
     }
@@ -962,7 +981,7 @@ class AACPManager {
             return false
         }
 
-        val targetMac = connectedDevices.find { it.mac != selfMacAddress }?.mac
+        val targetMac = otherDeviceMacs(selfMacAddress).firstOrNull()
         if (targetMac == null) {
             Log.w(TAG, "Cannot send Smart Routing Show UI packet: No connected device found")
             return false
@@ -1001,11 +1020,9 @@ class AACPManager {
 
     fun sendHijackReversed(selfMacAddress: String): Boolean {
         var success = false
-        for (connectedDevice in connectedDevices) {
-            if (connectedDevice.mac != selfMacAddress) {
-                Log.d(TAG, "Sending Hijack Reversed packet to ${connectedDevice.mac}")
-                success = sendDataPacket(createHijackReversedPacket(connectedDevice.mac)) || success
-            }
+        for (targetMac in otherDeviceMacs(selfMacAddress)) {
+            Log.d(TAG, "Sending Hijack Reversed packet to $targetMac")
+            success = sendDataPacket(createHijackReversedPacket(targetMac)) || success
         }
         return success
     }

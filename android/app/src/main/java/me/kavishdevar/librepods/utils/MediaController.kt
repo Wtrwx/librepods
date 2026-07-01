@@ -21,6 +21,7 @@
 package me.kavishdevar.librepods.utils
 
 import android.content.SharedPreferences
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
 import android.os.Build
@@ -51,10 +52,25 @@ object MediaController {
     private var lastPlaybackCallbackAt: Long = 0L
     private var lastKnownIsMusicActive: Boolean? = null
 
-    private const val PAUSED_FOR_OTHER_DEVICE_CLEAR_MS = 500L
+    private const val PAUSED_FOR_OTHER_DEVICE_CLEAR_MS = 5000L
+    private const val OWNERSHIP_RETRY_MS = 3200L
     private val clearPausedForOtherDeviceRunnable = Runnable {
         pausedForOtherDevice = false
         Log.d("MediaController", "Cleared pausedForOtherDevice after timeout, resuming normal playback monitoring")
+    }
+    private val deferredTakeOverRunnable = Runnable {
+        if (!this::audioManager.isInitialized) return@Runnable
+        if (!audioManager.isMusicActive) {
+            Log.d("MediaController", "Deferred take-over skipped because music is no longer active")
+            return@Runnable
+        }
+        Log.d("MediaController", "Deferred take-over after ownership-loss guard")
+        recentlyLostOwnership = false
+        pausedForOtherDevice = false
+        userPlayedTheMedia = true
+        if (!pausedWhileTakingOver) {
+            ServiceManager.getService()?.takeOver("music")
+        }
     }
 
     private var relativeVolume: Boolean = false
@@ -126,26 +142,32 @@ object MediaController {
             }
 
             Log.d("MediaController", "Configs received: ${configs?.size ?: 0} configurations")
-            val currentActiveContentTypes = configs?.flatMap { config ->
+            val currentActiveAttributes = configs?.mapNotNull { config ->
                 Log.d("MediaController", "Processing config: ${config}, audioAttributes: ${config.audioAttributes}")
                 config.audioAttributes?.let { attrs ->
                     val contentType = attrs.contentType
-                    Log.d("MediaController", "Config content type: $contentType")
-                    listOf(contentType)
+                    val usage = attrs.usage
+                    Log.d("MediaController", "Config content type: $contentType, usage: $usage")
+                    attrs
                 } ?: run {
                     Log.d("MediaController", "Config has no audioAttributes")
-                    emptyList()
+                    null
                 }
-            }?.toSet() ?: emptySet()
+            } ?: emptyList()
+            val currentActiveContentTypes = currentActiveAttributes.map { it.contentType }.toSet()
+            val currentActiveUsages = currentActiveAttributes.map { it.usage }.toSet()
 
             Log.d("MediaController", "Current active content types: $currentActiveContentTypes")
+            Log.d("MediaController", "Current active usages: $currentActiveUsages")
 
-            val hasNewMusicOrMovie = currentActiveContentTypes.any { contentType ->
-                contentType == android.media.AudioAttributes.CONTENT_TYPE_MUSIC ||
-                contentType == android.media.AudioAttributes.CONTENT_TYPE_MOVIE
+            val hasNewMusicOrMovie = currentActiveAttributes.any { attrs ->
+                attrs.usage == AudioAttributes.USAGE_MEDIA ||
+                attrs.usage == AudioAttributes.USAGE_GAME ||
+                attrs.contentType == AudioAttributes.CONTENT_TYPE_MUSIC ||
+                attrs.contentType == AudioAttributes.CONTENT_TYPE_MOVIE
             }
 
-            Log.d("MediaController", "Has new music or movie: $hasNewMusicOrMovie")
+            Log.d("MediaController", "Has local media playback: $hasNewMusicOrMovie")
 
             if (pausedForOtherDevice) {
                 handler.removeCallbacks(clearPausedForOtherDeviceRunnable)
@@ -153,7 +175,11 @@ object MediaController {
 
                 if (isActive) {
                     Log.d("MediaController", "Detected play while pausedForOtherDevice; attempting to take over")
-                    if (!recentlyLostOwnership && hasNewMusicOrMovie) {
+                    if (recentlyLostOwnership && hasNewMusicOrMovie) {
+                        Log.d("MediaController", "Recently lost ownership; scheduling deferred take-over instead of dropping user play")
+                        handler.removeCallbacks(deferredTakeOverRunnable)
+                        handler.postDelayed(deferredTakeOverRunnable, OWNERSHIP_RETRY_MS)
+                    } else if (hasNewMusicOrMovie) {
                         pausedForOtherDevice = false
                         userPlayedTheMedia = true
                         if (!pausedWhileTakingOver) {
@@ -193,7 +219,9 @@ object MediaController {
                         Log.d("MediaController", "Music/movie is active and not pausedWhileTakingOver; requesting takeOver")
                         ServiceManager.getService()?.takeOver("music")
                     } else {
-                        Log.d("MediaController", "Skipping take-over due to recent ownership loss")
+                        Log.d("MediaController", "Recently lost ownership; scheduling deferred take-over")
+                        handler.removeCallbacks(deferredTakeOverRunnable)
+                        handler.postDelayed(deferredTakeOverRunnable, OWNERSHIP_RETRY_MS)
                     }
                 }
             }
