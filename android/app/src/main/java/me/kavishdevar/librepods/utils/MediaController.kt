@@ -306,12 +306,14 @@ object MediaController {
 
     @Synchronized
     fun sendPlay(replayWhenPaused: Boolean = false, force: Boolean = false) {
-        Log.d("MediaController", "Sending play with iPausedTheMedia: $iPausedTheMedia, replayWhenPaused: $replayWhenPaused, force: $force")
-        if (replayWhenPaused) {
-            lastPlayWithReplay = true
-            lastPlayTime = SystemClock.uptimeMillis()
-        }
-        if (iPausedTheMedia || force) { // very creative, ik. thanks.
+        val isActive = audioManager.isMusicActive
+        Log.d("MediaController", "Sending play with iPausedTheMedia: $iPausedTheMedia, replayWhenPaused: $replayWhenPaused, force: $force, isMusicActive: $isActive")
+        val shouldDispatchPlay = iPausedTheMedia || (force && !isActive)
+        if (shouldDispatchPlay) { // very creative, ik. thanks.
+            if (replayWhenPaused) {
+                lastPlayWithReplay = true
+                lastPlayTime = SystemClock.uptimeMillis()
+            }
             Log.d("MediaController", "Sending play and setting userPlayedTheMedia to false")
             userPlayedTheMedia = false
             audioManager.dispatchMediaKeyEvent(
@@ -327,6 +329,8 @@ object MediaController {
                 )
             )
             lastSelfActionAt = SystemClock.uptimeMillis()
+        } else if (force && isActive) {
+            Log.d("MediaController", "Skipping forced play because media is already active")
         }
         if (!audioManager.isMusicActive) {
             Log.d("MediaController", "Setting iPausedTheMedia to false")

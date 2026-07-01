@@ -3218,6 +3218,26 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     }
 
+    private fun getProfileConnectionState(
+        proxy: BluetoothProfile,
+        device: BluetoothDevice?,
+        profileName: String
+    ): Int {
+        if (device == null) {
+            Log.d(TAG, "not checking $profileName connection state, device is null")
+            return BluetoothProfile.STATE_DISCONNECTED
+        }
+
+        return try {
+            val state = proxy.getConnectionState(device)
+            Log.d(TAG, "$profileName connection state for ${device.address}: $state")
+            state
+        } catch (e: Exception) {
+            Log.w(TAG, "failed to get $profileName connection state: ${e.message}")
+            BluetoothProfile.STATE_DISCONNECTED
+        }
+    }
+
     private fun scheduleSetAudioActiveDevices(
         context: Context,
         device: BluetoothDevice?,
@@ -3281,6 +3301,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                 if (profile == BluetoothProfile.A2DP) {
+                    val connectionState = getProfileConnectionState(proxy, device, "A2DP")
+                    val shouldScheduleActiveRetries = connectionState != BluetoothProfile.STATE_CONNECTED
                     if (context.checkSelfPermission("android.permission.BLUETOOTH_PRIVILEGED") == PackageManager.PERMISSION_GRANTED) {
                         try {
                             val policyMethod = proxy.javaClass.getMethod(
@@ -3293,9 +3315,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
                             val connectMethod =
                                 proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                            connectMethod.invoke(
-                                proxy, device
-                            )
+                            if (connectionState == BluetoothProfile.STATE_DISCONNECTED) {
+                                connectMethod.invoke(
+                                    proxy, device
+                                )
+                            } else {
+                                Log.d(TAG, "skipping A2DP.connect because current state is $connectionState")
+                            }
                             setProfileActiveDevice(proxy, device, "A2DP")
                         } catch (e: Exception) {
                             e.printStackTrace()
@@ -3304,21 +3330,35 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             if (MediaController.pausedWhileTakingOver) {
                                 MediaController.sendPlay()
                             }
+                            if (shouldScheduleActiveRetries) {
+                                scheduleSetAudioActiveDevices(context, device, includeHeadset)
+                            } else {
+                                Log.d(TAG, "skipping delayed active-device retries because A2DP is already connected")
+                            }
                         }
                     }
                     else {
                         try {
                             val connectMethod =
                                 proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                            connectMethod.invoke(
-                                proxy, device
-                            )
+                            if (connectionState == BluetoothProfile.STATE_DISCONNECTED) {
+                                connectMethod.invoke(
+                                    proxy, device
+                                )
+                            } else {
+                                Log.d(TAG, "skipping A2DP.connect because current state is $connectionState")
+                            }
                             setProfileActiveDevice(proxy, device, "A2DP")
-                            Log.d(TAG, "not setting connection policy for A2DP, no BLUETOOTH_PRIVILEGED permission. just called connect")
+                            Log.d(TAG, "not setting connection policy for A2DP, no BLUETOOTH_PRIVILEGED permission")
                         } catch (e: Exception) {
                             e.printStackTrace()
                         } finally {
                             bluetoothAdapter.closeProfileProxy(BluetoothProfile.A2DP, proxy)
+                            if (shouldScheduleActiveRetries) {
+                                scheduleSetAudioActiveDevices(context, device, includeHeadset)
+                            } else {
+                                Log.d(TAG, "skipping delayed active-device retries because A2DP is already connected")
+                            }
                         }
                     }
                 }
@@ -3331,6 +3371,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
                 override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                     if (profile == BluetoothProfile.HEADSET) {
+                        val connectionState = getProfileConnectionState(proxy, device, "HEADSET")
                         if (checkSelfPermission("android.permission.MODIFY_PHONE_STATE") == PackageManager.PERMISSION_GRANTED) {
                             try {
                                 val policyMethod = proxy.javaClass.getMethod(
@@ -3345,7 +3386,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                 policyMethod.invoke(proxy, device, 100)
                                 val connectMethod =
                                     proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                                connectMethod.invoke(proxy, device)
+                                if (connectionState == BluetoothProfile.STATE_DISCONNECTED) {
+                                    connectMethod.invoke(proxy, device)
+                                } else {
+                                    Log.d(TAG, "skipping HEADSET.connect because current state is $connectionState")
+                                }
                                 setProfileActiveDevice(proxy, device, "HEADSET")
                             } catch (e: Exception) {
                                 e.printStackTrace()
@@ -3364,8 +3409,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         } else {
             Log.d(TAG, "skipping HEADSET connect/active for media route")
         }
-
-        scheduleSetAudioActiveDevices(context, device, includeHeadset)
     }
 
     fun setName(name: String) {
