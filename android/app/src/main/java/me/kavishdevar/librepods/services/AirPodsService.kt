@@ -1785,8 +1785,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         )
 
         val notification = NotificationCompat.Builder(this, "background_service_status")
-            .setSmallIcon(R.drawable.airpods).setContentTitle("Background Service Running")
-            .setContentText("Useless notification, disable it by clicking on it.")
+            .setSmallIcon(R.drawable.airpods).setContentTitle(getString(R.string.background_service_running))
+            .setContentText(getString(R.string.background_service_notification_text))
             .setContentIntent(pendingIntentNotifDisable).setCategory(Notification.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_LOW).setOngoing(true).build()
 
@@ -1819,10 +1819,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         )
 
         val notification = NotificationCompat.Builder(this, "socket_connection_failure")
-            .setSmallIcon(R.drawable.airpods).setContentTitle("AirPods Connection Issue")
-            .setContentText("Unable to connect to AirPods over L2CAP").setStyle(
+            .setSmallIcon(R.drawable.airpods).setContentTitle(getString(R.string.airpods_connection_issue))
+            .setContentText(getString(R.string.unable_connect_l2cap)).setStyle(
                 NotificationCompat.BigTextStyle().bigText(
-                    "Your AirPods are connected via Bluetooth, but LibrePods couldn't connect to AirPods using L2CAP. Error: $errorMessage"
+                    getString(R.string.l2cap_error_details, errorMessage)
                 )
             ).setContentIntent(pendingIntent).setCategory(Notification.CATEGORY_ERROR)
             .setPriority(NotificationCompat.PRIORITY_HIGH).setAutoCancel(true).build()

@@ -135,7 +135,7 @@ fun OnboardingScreen(
                                         horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
                                         Text(
-                                            text = "Welcome to",
+                                            text = stringResource(R.string.welcome_to),
                                             style = MaterialTheme.typography.displayLarge,
                                             color = MaterialTheme.colorScheme.primary,
                                             textAlign = TextAlign.Center,
@@ -171,7 +171,7 @@ fun OnboardingScreen(
                                         ) {
                                             Icon(
                                                 Icons.AutoMirrored.Default.ArrowForward,
-                                                contentDescription = "forward",
+                                                contentDescription = stringResource(R.string.forward),
                                                 modifier = Modifier.size(IconButtonDefaults.largeIconSize),
                                             )
                                         }
