@@ -21,6 +21,7 @@
 package me.kavishdevar.librepods.utils
 
 import android.content.SharedPreferences
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
 import android.os.Build
@@ -141,26 +142,32 @@ object MediaController {
             }
 
             Log.d("MediaController", "Configs received: ${configs?.size ?: 0} configurations")
-            val currentActiveContentTypes = configs?.flatMap { config ->
+            val currentActiveAttributes = configs?.mapNotNull { config ->
                 Log.d("MediaController", "Processing config: ${config}, audioAttributes: ${config.audioAttributes}")
                 config.audioAttributes?.let { attrs ->
                     val contentType = attrs.contentType
-                    Log.d("MediaController", "Config content type: $contentType")
-                    listOf(contentType)
+                    val usage = attrs.usage
+                    Log.d("MediaController", "Config content type: $contentType, usage: $usage")
+                    attrs
                 } ?: run {
                     Log.d("MediaController", "Config has no audioAttributes")
-                    emptyList()
+                    null
                 }
-            }?.toSet() ?: emptySet()
+            } ?: emptyList()
+            val currentActiveContentTypes = currentActiveAttributes.map { it.contentType }.toSet()
+            val currentActiveUsages = currentActiveAttributes.map { it.usage }.toSet()
 
             Log.d("MediaController", "Current active content types: $currentActiveContentTypes")
+            Log.d("MediaController", "Current active usages: $currentActiveUsages")
 
-            val hasNewMusicOrMovie = currentActiveContentTypes.any { contentType ->
-                contentType == android.media.AudioAttributes.CONTENT_TYPE_MUSIC ||
-                contentType == android.media.AudioAttributes.CONTENT_TYPE_MOVIE
+            val hasNewMusicOrMovie = currentActiveAttributes.any { attrs ->
+                attrs.usage == AudioAttributes.USAGE_MEDIA ||
+                attrs.usage == AudioAttributes.USAGE_GAME ||
+                attrs.contentType == AudioAttributes.CONTENT_TYPE_MUSIC ||
+                attrs.contentType == AudioAttributes.CONTENT_TYPE_MOVIE
             }
 
-            Log.d("MediaController", "Has new music or movie: $hasNewMusicOrMovie")
+            Log.d("MediaController", "Has local media playback: $hasNewMusicOrMovie")
 
             if (pausedForOtherDevice) {
                 handler.removeCallbacks(clearPausedForOtherDeviceRunnable)

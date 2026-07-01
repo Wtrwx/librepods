@@ -910,7 +910,11 @@ class AACPManager {
         return opcode + buffer.array()
     }
 
-    fun sendMediaInformataion(selfMacAddress: String, streamingState: Boolean = false): Boolean {
+    fun sendMediaInformataion(
+        selfMacAddress: String,
+        streamingState: Boolean = false,
+        audioCategory: AudioSourceType = if (streamingState) AudioSourceType.MEDIA else AudioSourceType.NONE
+    ): Boolean {
         if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
             // throw IllegalArgumentException("MAC address must be 6 bytes")
             Log.d(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
@@ -922,16 +926,19 @@ class AACPManager {
             Log.w(TAG, "Cannot send Media Information packet: No connected device found")
             return false
         }
-        Log.d(TAG, "Sending Media Information packet to $targetMac")
+        Log.d(TAG, "Sending Media Information packet to $targetMac, streamingState=$streamingState, audioCategory=${audioCategory.name}")
         return sendDataPacket(
             createMediaInformationPacket(
-                selfMacAddress, targetMac, streamingState
+                selfMacAddress, targetMac, streamingState, audioCategory
             )
         )
     }
 
     fun createMediaInformationPacket(
-        selfMacAddress: String, targetMacAddress: String, streamingState: Boolean = true
+        selfMacAddress: String,
+        targetMacAddress: String,
+        streamingState: Boolean = true,
+        audioCategory: AudioSourceType = if (streamingState) AudioSourceType.MEDIA else AudioSourceType.NONE
     ): ByteArray {
         val opcode = byteArrayOf(Opcodes.SMART_ROUTING, 0x00)
         val buffer = ByteBuffer.allocate(138)
@@ -962,7 +969,7 @@ class AACPManager {
         buffer.put(0x58) // 'X'
         buffer.put("otherDevice".toByteArray())
         buffer.put("AudioCategory".toByteArray())
-        buffer.put(byteArrayOf(0x31, 0x2D, 0x01))
+        buffer.put(byteArrayOf((0x30 + audioCategory.value).toByte(), 0x2D, 0x01))
 
         return opcode + buffer.array()
     }

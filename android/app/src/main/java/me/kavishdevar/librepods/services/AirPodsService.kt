@@ -2553,17 +2553,29 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         aacpManager.sendControlCommand(
             AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION.value, 1
         )
-        aacpManager.sendMediaInformataion(localMac, streamingState = true)
-        connectAudio(this, device)
+        aacpManager.sendMediaInformataion(
+            localMac,
+            streamingState = true,
+            audioCategory = AACPManager.Companion.AudioSourceType.MEDIA
+        )
+        connectAudio(this, device, includeHeadset = false)
 
         CoroutineScope(Dispatchers.IO).launch {
             delay(300)
-            aacpManager.sendMediaInformataion(localMac, streamingState = true)
+            aacpManager.sendMediaInformataion(
+                localMac,
+                streamingState = true,
+                audioCategory = AACPManager.Companion.AudioSourceType.MEDIA
+            )
             delay(700)
             MediaController.sendPlay(replayWhenPaused = true)
             delay(1000)
-            connectAudio(this@AirPodsService, device)
-            aacpManager.sendMediaInformataion(localMac, streamingState = true)
+            connectAudio(this@AirPodsService, device, includeHeadset = false)
+            aacpManager.sendMediaInformataion(
+                localMac,
+                streamingState = true,
+                audioCategory = AACPManager.Companion.AudioSourceType.MEDIA
+            )
             MediaController.sendPlay(force = true)
         }
     }
@@ -2581,13 +2593,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             )
             aacpManager.sendMediaInformataion(
                 localMac,
-                streamingState = true
+                streamingState = true,
+                audioCategory = AACPManager.Companion.AudioSourceType.MEDIA
             )
             aacpManager.sendHijackReversed(
                 localMac
             )
             connectAudio(
-                this@AirPodsService, device
+                this@AirPodsService, device, includeHeadset = false
             )
             otherDeviceTookOver = false
         }
@@ -2628,7 +2641,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 )
                 aacpManager.sendMediaInformataion(
                     localMac,
-                    streamingState = takingOverFor == "music"
+                    streamingState = takingOverFor == "music",
+                    audioCategory = when (takingOverFor) {
+                        "call" -> AACPManager.Companion.AudioSourceType.CALL
+                        "music" -> AACPManager.Companion.AudioSourceType.MEDIA
+                        else -> AACPManager.Companion.AudioSourceType.NONE
+                    }
                 )
                 aacpManager.sendSmartRoutingShowUI(
                     localMac
@@ -2637,7 +2655,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     localMac
                 )
                 otherDeviceTookOver = false
-                connectAudio(this, device)
+                connectAudio(this, device, includeHeadset = takingOverFor != "music")
                 showIsland(
                     this,
                     batteryNotification.getBattery()
@@ -2651,7 +2669,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 CoroutineScope(Dispatchers.IO).launch {
                     delay(250)
                     if (takingOverFor == "music") {
-                        aacpManager.sendMediaInformataion(localMac, streamingState = true)
+                        aacpManager.sendMediaInformataion(
+                            localMac,
+                            streamingState = true,
+                            audioCategory = AACPManager.Companion.AudioSourceType.MEDIA
+                        )
                     }
                     delay(500) // a2dp takes time, and so does taking control + AirPods pause it for no reason after connecting
                     if (takingOverFor == "music") {
@@ -2667,7 +2689,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     if (takingOverFor == "music") {
                         Log.d(TAG, "resuming again just in case")
                         MediaController.sendPlay(force = true)
-                        aacpManager.sendMediaInformataion(localMac, streamingState = true)
+                        aacpManager.sendMediaInformataion(
+                            localMac,
+                            streamingState = true,
+                            audioCategory = AACPManager.Companion.AudioSourceType.MEDIA
+                        )
                     }
                 }
             } else {
@@ -3192,15 +3218,24 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     }
 
-    private fun scheduleSetAudioActiveDevices(context: Context, device: BluetoothDevice?) {
+    private fun scheduleSetAudioActiveDevices(
+        context: Context,
+        device: BluetoothDevice?,
+        includeHeadset: Boolean = true
+    ) {
         if (device == null) return
 
         listOf(250L, 1000L, 2500L).forEach { delayMs ->
-            scheduleSetAudioActiveDevices(context, device, delayMs)
+            scheduleSetAudioActiveDevices(context, device, delayMs, includeHeadset)
         }
     }
 
-    private fun scheduleSetAudioActiveDevices(context: Context, device: BluetoothDevice, delayMs: Long) {
+    private fun scheduleSetAudioActiveDevices(
+        context: Context,
+        device: BluetoothDevice,
+        delayMs: Long,
+        includeHeadset: Boolean
+    ) {
         Handler(Looper.getMainLooper()).postDelayed({
             val bluetoothAdapter = context.getSystemService(BluetoothManager::class.java).adapter
 
@@ -3219,24 +3254,28 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 override fun onServiceDisconnected(profile: Int) {}
             }, BluetoothProfile.A2DP)
 
-            bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
-                override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                    try {
-                        if (profile == BluetoothProfile.HEADSET) {
-                            Log.d(TAG, "retrying HEADSET active device after ${delayMs}ms")
-                            setProfileActiveDevice(proxy, device, "HEADSET")
+            if (includeHeadset) {
+                bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
+                    override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                        try {
+                            if (profile == BluetoothProfile.HEADSET) {
+                                Log.d(TAG, "retrying HEADSET active device after ${delayMs}ms")
+                                setProfileActiveDevice(proxy, device, "HEADSET")
+                            }
+                        } finally {
+                            bluetoothAdapter.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
                         }
-                    } finally {
-                        bluetoothAdapter.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
                     }
-                }
 
-                override fun onServiceDisconnected(profile: Int) {}
-            }, BluetoothProfile.HEADSET)
+                    override fun onServiceDisconnected(profile: Int) {}
+                }, BluetoothProfile.HEADSET)
+            } else {
+                Log.d(TAG, "skipping HEADSET active device retry for media route after ${delayMs}ms")
+            }
         }, delayMs)
     }
 
-    fun connectAudio(context: Context, device: BluetoothDevice?) {
+    fun connectAudio(context: Context, device: BluetoothDevice?, includeHeadset: Boolean = true) {
         val bluetoothAdapter = context.getSystemService(BluetoothManager::class.java).adapter
 
         bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
@@ -3288,41 +3327,45 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             override fun onServiceDisconnected(profile: Int) {}
         }, BluetoothProfile.A2DP)
 
-        bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                if (profile == BluetoothProfile.HEADSET) {
-                    if (checkSelfPermission("android.permission.MODIFY_PHONE_STATE") == PackageManager.PERMISSION_GRANTED) {
-                        try {
-                            val policyMethod = proxy.javaClass.getMethod(
-                                "setConnectionPolicy",
-                                BluetoothDevice::class.java,
-                                Int::class.java
-                            )
-                            Log.d(
-                                TAG,
-                                "calling HEADSET.setConnectionPolicy for ${device?.address} to 100"
-                            )
-                            policyMethod.invoke(proxy, device, 100)
-                            val connectMethod =
-                                proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                            connectMethod.invoke(proxy, device)
-                            setProfileActiveDevice(proxy, device, "HEADSET")
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        } finally {
+        if (includeHeadset) {
+            bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
+                override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                    if (profile == BluetoothProfile.HEADSET) {
+                        if (checkSelfPermission("android.permission.MODIFY_PHONE_STATE") == PackageManager.PERMISSION_GRANTED) {
+                            try {
+                                val policyMethod = proxy.javaClass.getMethod(
+                                    "setConnectionPolicy",
+                                    BluetoothDevice::class.java,
+                                    Int::class.java
+                                )
+                                Log.d(
+                                    TAG,
+                                    "calling HEADSET.setConnectionPolicy for ${device?.address} to 100"
+                                )
+                                policyMethod.invoke(proxy, device, 100)
+                                val connectMethod =
+                                    proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
+                                connectMethod.invoke(proxy, device)
+                                setProfileActiveDevice(proxy, device, "HEADSET")
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            } finally {
+                                bluetoothAdapter.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
+                            }
+                        } else {
+                            Log.d(TAG, "not setting connection policy for HEADSET, no MODIFIY_PHONE_STATE permission")
                             bluetoothAdapter.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
                         }
-                    } else {
-                        Log.d(TAG, "not setting connection policy for HEADSET, no MODIFIY_PHONE_STATE permission")
-                        bluetoothAdapter.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
                     }
                 }
-            }
 
-            override fun onServiceDisconnected(profile: Int) {}
-        }, BluetoothProfile.HEADSET)
+                override fun onServiceDisconnected(profile: Int) {}
+            }, BluetoothProfile.HEADSET)
+        } else {
+            Log.d(TAG, "skipping HEADSET connect/active for media route")
+        }
 
-        scheduleSetAudioActiveDevices(context, device)
+        scheduleSetAudioActiveDevices(context, device, includeHeadset)
     }
 
     fun setName(name: String) {
