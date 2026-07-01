@@ -60,6 +60,11 @@ object MediaController {
     }
     private val deferredTakeOverRunnable = Runnable {
         if (!this::audioManager.isInitialized) return@Runnable
+        val service = ServiceManager.getService()
+        if (service?.shouldAutoTakeOverLocalMediaStart() != true) {
+            Log.d("MediaController", "Deferred take-over skipped because automatic media take-over is disabled")
+            return@Runnable
+        }
         if (!audioManager.isMusicActive) {
             Log.d("MediaController", "Deferred take-over skipped because music is no longer active")
             return@Runnable
@@ -69,7 +74,7 @@ object MediaController {
         pausedForOtherDevice = false
         userPlayedTheMedia = true
         if (!pausedWhileTakingOver) {
-            ServiceManager.getService()?.takeOver("music")
+            service?.takeOver("music")
         }
     }
 
@@ -168,6 +173,7 @@ object MediaController {
             }
 
             Log.d("MediaController", "Has local media playback: $hasNewMusicOrMovie")
+            val service = ServiceManager.getService()
 
             if (pausedForOtherDevice) {
                 handler.removeCallbacks(clearPausedForOtherDeviceRunnable)
@@ -175,7 +181,9 @@ object MediaController {
 
                 if (isActive) {
                     Log.d("MediaController", "Detected play while pausedForOtherDevice; attempting to take over")
-                    if (recentlyLostOwnership && hasNewMusicOrMovie) {
+                    if (service?.shouldAutoTakeOverLocalMediaStart() != true) {
+                        Log.d("MediaController", "Skipping take-over while another device owns playback; automatic media take-over is disabled")
+                    } else if (recentlyLostOwnership && hasNewMusicOrMovie) {
                         Log.d("MediaController", "Recently lost ownership; scheduling deferred take-over instead of dropping user play")
                         handler.removeCallbacks(deferredTakeOverRunnable)
                         handler.postDelayed(deferredTakeOverRunnable, OWNERSHIP_RETRY_MS)
@@ -183,7 +191,7 @@ object MediaController {
                         pausedForOtherDevice = false
                         userPlayedTheMedia = true
                         if (!pausedWhileTakingOver) {
-                            ServiceManager.getService()?.takeOver("music")
+                            service?.takeOver("music")
                         }
                     } else {
                         Log.d("MediaController", "Skipping take-over due to recent ownership loss or no new music/movie")
@@ -197,12 +205,17 @@ object MediaController {
             }
 
             if (configs != null && !iPausedTheMedia) {
-                val localMac = ServiceManager.getService()?.localMac ?: return
+                if (service == null) return
+                val localMac = service.localMac
                 if (localMac == "") return
-                ServiceManager.getService()?.aacpManager?.sendMediaInformataion(
-                    localMac,
-                    isActive
-                )
+                if (service.shouldSendPassiveLocalMediaInformation()) {
+                    service.aacpManager.sendMediaInformataion(
+                        localMac,
+                        isActive
+                    )
+                } else {
+                    Log.d("MediaController", "Skipping passive media information update to avoid stealing audio from another device")
+                }
                 Log.d("MediaController", "User changed media state themselves; will wait for ear detection pause before auto-play")
                 handler.postDelayed({
                     userPlayedTheMedia = audioManager.isMusicActive
@@ -215,9 +228,11 @@ object MediaController {
             Log.d("MediaController", "pausedWhileTakingOver: $pausedWhileTakingOver")
             if (!pausedWhileTakingOver && isActive && hasNewMusicOrMovie) {
                 if (lastKnownIsMusicActive != true) {
-                    if (!recentlyLostOwnership) {
+                    if (service?.shouldAutoTakeOverLocalMediaStart() != true) {
+                        Log.d("MediaController", "Music/movie is active but automatic media take-over is disabled")
+                    } else if (!recentlyLostOwnership) {
                         Log.d("MediaController", "Music/movie is active and not pausedWhileTakingOver; requesting takeOver")
-                        ServiceManager.getService()?.takeOver("music")
+                        service?.takeOver("music")
                     } else {
                         Log.d("MediaController", "Recently lost ownership; scheduling deferred take-over")
                         handler.removeCallbacks(deferredTakeOverRunnable)
