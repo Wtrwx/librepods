@@ -85,7 +85,6 @@ android {
         create("foss") {
             dimension = "env"
             buildConfigField("Boolean", "PLAY_BUILD", "false")
-            versionNameSuffix = "-disconnect-only"
         }
         create("play") {
             dimension = "env"
