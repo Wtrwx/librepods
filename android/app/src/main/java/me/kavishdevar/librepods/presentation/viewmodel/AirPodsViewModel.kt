@@ -105,7 +105,7 @@ data class AirPodsUiState(
 )
 
 val demoInstance = AirPodsInstance(
-    name = "AirPods Pro",
+    name = "[DEMO] AirPods Pro",
     model = AirPodsModels.getModelByModelNumber("A3064")!!,
     actualModelNumber = "A3064",
     serialNumber = "JXF9Q94A40",
@@ -159,8 +159,6 @@ val demoState = AirPodsUiState(
     vendorIdHook = true,
 
     dynamicEndOfCharge = true,
-
-    connectionSuccessful = true,
 
     customEq = CustomEq(state = 2, low = 65, mid = 50, high = 70),
 

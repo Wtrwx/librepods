@@ -333,4 +333,5 @@
 感知</string>
     <string name="deleted_log_files">已删除 %1$d 个日志文件</string>
     <string name="failed_delete_log_files">无法删除日志文件</string>
+    <string name="compatibility_check_bypassed">已跳过兼容性检查。请确认你的设备受支持。</string>
 </resources>

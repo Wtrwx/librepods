@@ -344,4 +344,5 @@
 Awareness</string>
     <string name="deleted_log_files">Deleted %1$d log files</string>
     <string name="failed_delete_log_files">Failed to delete log files</string>
+    <string name="compatibility_check_bypassed">Compatibility check bypassed. Are you sure your device is compatible?</string>
 </resources>
