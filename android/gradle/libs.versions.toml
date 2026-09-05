@@ -1,4 +1,6 @@
 [versions]
+junit = "4.13.2"
+json = "20260814"
 accompanistPermissions = "0.37.3"
 agp = "9.2.1"
 kotlin = "2.3.21"
@@ -29,6 +31,8 @@ foundationLayout = "1.11.2"
 uiTextGoogleFonts = "1.11.2"
 
 [libraries]
+junit = { module = "junit:junit", version.ref = "junit" }
+json = { module = "org.json:json", version.ref = "json" }
 accompanist-permissions = { module = "com.google.accompanist:accompanist-permissions", version.ref = "accompanistPermissions" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
