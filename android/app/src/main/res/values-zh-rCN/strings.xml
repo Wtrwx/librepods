@@ -159,8 +159,12 @@
     <string name="use_alternate_head_tracking_packets">使用备用头部追踪数据包</string>
     <string name="use_alternate_head_tracking_packets_description">如果头部追踪无法使用，请开启此项。它会向 AirPods 发送不同数据，用于请求或停止头部追踪数据。</string>
     <string name="act_as_an_apple_device">模拟为 Apple 设备</string>
-    <string name="act_as_an_apple_device_description">启用多设备连接和辅助功能，例如自定通透模式（放大、音调、环境噪声降低、对话增强和均衡器）</string>
+    <string name="act_as_an_apple_device_description">模拟 Apple 蓝牙身份以启用多设备连接。自动切换和辅助听力控制可在下方分别开启。</string>
     <string name="act_as_an_apple_device_warning">此功能可能不稳定。AirPods 最多可同时连接两台设备。如果你要搭配 iPad 或 Mac 等 Apple 设备使用，请先连接该设备，再连接 Android。</string>
+    <string name="vendor_att_socket">辅助听力控制通道</string>
+    <string name="vendor_att_socket_description">部分听力和自定通透设置需要此通道。默认关闭以改善 Mac 与 Android 同时连接的稳定性；更改后请重新连接耳机。</string>
+    <string name="smart_routing_auto_takeover">允许 Smart Routing 自动切换</string>
+    <string name="smart_routing_auto_takeover_description">播放或来电时，按下方接管设置向另一台设备请求耳机控制权。关闭后仍可手动移回此设备。</string>
     <string name="reset_hook_offset">重置 Hook 偏移</string>
     <string name="reset_hook_offset_description">这会清除当前 Hook 偏移，并需要你重新完成设置流程。确定要继续吗？</string>
     <string name="reset">重置</string>

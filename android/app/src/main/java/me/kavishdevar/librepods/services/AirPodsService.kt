@@ -31,6 +31,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.appwidget.AppWidgetManager
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothA2dp
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
@@ -55,6 +56,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.os.UserHandle
 import android.provider.Settings
 import android.telecom.TelecomManager
@@ -72,6 +74,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.edit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -163,6 +167,79 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     var cameraActive = false
     private var disconnectedBecauseReversed = false
     private var otherDeviceTookOver = false
+    private var lastAudioSourceMac: String? = null
+    private var lastAudioSourceType: AACPManager.Companion.AudioSourceType? = null
+    private var lastAacpControlRefreshAt = 0L
+    private val routingState = SmartRoutingState(SystemClock::elapsedRealtime)
+    private val routingScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    @Volatile private var destroyed = false
+    @Volatile private var aacpSessionId = 0L
+    private var pendingAudioResumeReceiver: BroadcastReceiver? = null
+
+    private fun runRoutingAction(action: () -> Unit) {
+        val socket = BluetoothConnectionManager.aacpSocket
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (!destroyed) action()
+        } else routingScope.launch {
+            if (!destroyed && BluetoothConnectionManager.aacpSocket === socket) action()
+        }
+    }
+
+    fun routingGeneration(): Long = routingState.generation
+
+    fun canUseLocalAudioRoute(generation: Long = routingState.generation): Boolean =
+        !destroyed && routingState.allowsLocal(
+            generation,
+            allowUnknown = !XposedRemotePrefProvider.create().getBoolean("vendor_id_hook", false)
+        )
+
+    fun canResumeLocalMedia(): Boolean = canUseLocalAudioRoute() &&
+        routingState.owner != SmartRoutingState.Owner.LOCAL_PENDING
+
+    private fun beginLocalRoute(reason: String, resumeMedia: Boolean = false): Long {
+        val generation = routingState.requestLocal(resumeMedia)
+        MediaController.localRouteRequested()
+        otherDeviceTookOver = false
+        Log.d("SmartRouting", "LOCAL_PENDING generation=$generation reason=$reason")
+        routingScope.launch {
+            delay(SmartRoutingState.CLAIM_TIMEOUT_MS)
+            if (routingState.isPending(generation)) yieldToRemote("local takeover timed out")
+        }
+        return generation
+    }
+
+    private fun yieldToRemote(reason: String, explicitHandoff: Boolean = true) {
+        val firstHandoff = routingState.owner != SmartRoutingState.Owner.REMOTE
+        val generation = routingState.remote(explicitHandoff) ?: return
+        otherDeviceTookOver = true
+        if (!firstHandoff) return
+        MediaController.remoteRouteRequested()
+        aacpManager.sendControlCommand(
+            AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION.value, 0
+        )
+        if (localMac.isNotBlank()) aacpManager.sendMediaInformataion(localMac, streamingState = false)
+        // Keep both Bluetooth profiles connected for multipoint. Revoke only the local media route.
+        val target = device ?: return
+        val adapter = getSystemService(BluetoothManager::class.java).adapter ?: return
+        adapter.getProfileProxy(this, object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                try {
+                    if (!routingState.allowsRemote(generation) || destroyed) return
+                    val active = proxy.javaClass.getMethod("getActiveDevice").invoke(proxy) as? BluetoothDevice
+                    if (active?.address.equals(target.address, ignoreCase = true)) {
+                        proxy.javaClass.getMethod("setActiveDevice", BluetoothDevice::class.java)
+                            .invoke(proxy, null)
+                    }
+                } catch (e: Exception) {
+                    Log.w("SmartRouting", "Cannot clear A2DP active device; media pause remains in effect: ${e.message}")
+                } finally {
+                    adapter.closeProfileProxy(profile, proxy)
+                }
+            }
+            override fun onServiceDisconnected(profile: Int) {}
+        }, BluetoothProfile.A2DP)
+        Log.d("SmartRouting", "REMOTE generation=$generation reason=$reason")
+    }
 
     data class ServiceConfig(
         var deviceName: String = "AirPods",
@@ -663,6 +740,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             addAction("android.bluetooth.headset.action.VENDOR_SPECIFIC_HEADSET_EVENT")
             addAction("android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED")
             addAction("android.bluetooth.a2dp.profile.action.PLAYING_STATE_CHANGED")
+            addAction("android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED")
             addAction("android.bluetooth.device.action.UUID")
         }
 
@@ -697,6 +775,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 //                    }
 
                 } else if (intent?.action == AirPodsNotifications.AIRPODS_DISCONNECTED) {
+                    if (intent.hasExtra("aacp_session") && intent.getLongExtra("aacp_session", -1L) != aacpSessionId) return
                     device?.address?.let { XiaomiBatteryIslandPublisher.disconnected(this@AirPodsService, it) }
                     device = null
 //                    isConnectedLocally = false
@@ -897,7 +976,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
                 if (batteryNotification.getBattery()[0].status == BatteryStatus.CHARGING && batteryNotification.getBattery()[1].status == BatteryStatus.CHARGING) {
                     disconnectAudio(this@AirPodsService, device)
-                } else {
+                } else if (canUseLocalAudioRoute()) {
                     connectAudio(this@AirPodsService, device)
                 }
             }
@@ -950,22 +1029,20 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             }
 
             override fun onOwnershipChangeReceived(owns: Boolean) {
+                runRoutingAction {
                 if (!owns) {
-                    MediaController.recentlyLostOwnership = true
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        MediaController.recentlyLostOwnership = false
-                    }, 3000)
-                    Log.d(TAG, "ownership lost")
-                    MediaController.sendPause()
-                    MediaController.pausedForOtherDevice = true
-                    otherDeviceTookOver = true
-                    disconnectAudio(
-                        this@AirPodsService, device
-                    )
+                    yieldToRemote("AirPods confirmed ownership loss")
+                } else if (routingState.confirmLocal()) {
+                    otherDeviceTookOver = false
+                    MediaController.localRouteConfirmed()
+                    refreshAacpControlSession("AirPods confirmed local ownership")
+                    if (routingState.hasResumeRequest()) connectAudio(this@AirPodsService, device)
+                }
                 }
             }
 
             override fun onOwnershipToFalseRequest(sender: String, reasonReverseTapped: Boolean) {
+                runRoutingAction {
                 // TODO: Show a reverse button, but that's a lot of effort -- i'd have to change the UI too, which i hate doing, and handle other device's reverses too, and disconnect audio etc... so for now, just pause the audio and show the island without asking to reverse.
                 // handling reverse is a problem because we'd have to disconnect the audio, but there's no option connect audio again natively, so notification would have to be changed. I wish there was a way to just "change the audio output device".
                 // (20 minutes later) i've done it nonetheless :]
@@ -975,18 +1052,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     TAG,
                     "other device has hijacked the connection, reasonReverseTapped: $reasonReverseTapped"
                 )
-                aacpManager.sendControlCommand(
-                    AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION.value,
-                    byteArrayOf(0x00)
-                )
-                otherDeviceTookOver = true
-                disconnectAudio(
-                    this@AirPodsService, device
-                )
+                yieldToRemote("remote hijack request")
                 if (reasonReverseTapped) {
                     Log.d(TAG, "reverse tapped, disconnecting audio")
                     disconnectedBecauseReversed = true
-                    disconnectAudio(this@AirPodsService, device)
                     showIsland(
                         this@AirPodsService,
                         (batteryNotification.getBattery()
@@ -1014,7 +1083,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         otherDeviceName = senderName
                     )
                 }
-                MediaController.sendPause()
+                }
+            }
+
+            override fun onRemoteStreamingStateChanged(sender: String, isStreaming: Boolean) {
+                runRoutingAction {
+                if (!isStreaming || normalizeOtherDeviceMac(sender) == null) return@runRoutingAction
+                yieldToRemote("remote Smart Routing playback intent", explicitHandoff = false)
+                }
             }
 
             override fun onShowNearbyUI(sender: String) {
@@ -1124,28 +1200,33 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             }
 
             override fun onAudioSourceReceived(audioSource: ByteArray) {
-                Log.d(
-                    "AirPodsParser",
-                    "Audio source changed mac: ${aacpManager.audioSource?.mac}, type: ${aacpManager.audioSource?.type?.name}"
-                )
-                val audioSourceIsOtherDevice = aacpManager.audioSource?.let {
-                    it.type != AACPManager.Companion.AudioSourceType.NONE &&
-                            !it.mac.equals(localMac, ignoreCase = true)
-                } == true
-                if (localMac != "" && audioSourceIsOtherDevice) {
-                    rememberOtherDeviceMacs(listOfNotNull(aacpManager.audioSource?.mac))
-                    Log.d(
-                        "AirPodsParser",
-                        "Audio source is another device, better to give up aacp control"
-                    )
-                    aacpManager.sendControlCommand(
-                        AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION.value,
-                        byteArrayOf(0x00)
-                    )
-                    // this also means that the other device has start playing the audio, and if that's true, we can again start listening for audio config changes
-//                    Log.d(TAG, "Another device started playing audio, listening for audio config changes again")
-//                    MediaController.pausedForOtherDevice = false
-// future me: what the heck is this? this just means it will not be taking over again if audio source doesn't change???
+                val currentSource = aacpManager.audioSource ?: return
+                runRoutingAction {
+                val previousMac = lastAudioSourceMac
+                val previousType = lastAudioSourceType
+                lastAudioSourceMac = currentSource.mac
+                lastAudioSourceType = currentSource.type
+                Log.d("AirPodsParser", "Audio source changed mac: ${currentSource.mac}, type: ${currentSource.type}")
+                // NONE is an intermediate routing state, not a grant of ownership.
+                if (localMac.isBlank() || currentSource.type == AACPManager.Companion.AudioSourceType.NONE) return@runRoutingAction
+                if (!currentSource.mac.equals(localMac, ignoreCase = true)) {
+                    rememberOtherDeviceMacs(listOf(currentSource.mac))
+                    yieldToRemote("AACP audio source is remote", explicitHandoff = false)
+                } else {
+                    routingState.confirmLocalSource()
+                    otherDeviceTookOver = false
+                    MediaController.localRouteConfirmed()
+                    if (routingState.hasResumeRequest()) connectAudio(this@AirPodsService, device)
+                    if (!aacpManager.owns) {
+                        aacpManager.sendControlCommand(
+                            AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION.value, 1
+                        )
+                    }
+                    if (!previousMac.equals(localMac, ignoreCase = true) ||
+                        previousType == AACPManager.Companion.AudioSourceType.NONE) {
+                        refreshAacpControlSession("audio source returned to this phone")
+                    }
+                }
                 }
             }
 
@@ -1261,6 +1342,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         )
         var justEnabledA2dp = false
         earDetectionNotification.setStatus(earDetection)
+        if (!canUseLocalAudioRoute()) {
+            Log.d("SmartRouting", "PASSIVE ear detection; preserving remote audio route")
+            return
+        }
         if (config.earDetectionEnabled) {
             val data = earDetection.copyOfRange(earDetection.size - 2, earDetection.size)
             inEar = data[0] == 0x00.toByte() && data[1] == 0x00.toByte()
@@ -1338,6 +1423,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
 
     private fun registerA2dpConnectionReceiver() {
+        val generation = routingState.generation
+        pendingAudioResumeReceiver?.let { runCatching { unregisterReceiver(it) } }
         val a2dpConnectionStateReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 if (intent.action == "android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED") {
@@ -1357,16 +1444,17 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
                     if (state == BluetoothProfile.STATE_CONNECTED && previousState != BluetoothProfile.STATE_CONNECTED && device?.address == this@AirPodsService.device?.address) {
 
-                        Log.d("MediaController", "A2DP connected, sending play command")
-                        MediaController.sendPlay()
-                        MediaController.iPausedTheMedia = false
-
+                        if (canUseLocalAudioRoute(generation)) {
+                            MediaController.sendPlay()
+                        }
                         context.unregisterReceiver(this)
+                        if (pendingAudioResumeReceiver === this) pendingAudioResumeReceiver = null
                     }
                 }
             }
         }
 
+        pendingAudioResumeReceiver = a2dpConnectionStateReceiver
         val a2dpIntentFilter =
             IntentFilter("android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -2409,7 +2497,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
 
     @Suppress("ClassName")
-    private object bluetoothReceiver : BroadcastReceiver() {
+    private val bluetoothReceiver = object : BroadcastReceiver() {
         @SuppressLint("MissingPermission")
         override fun onReceive(context: Context?, intent: Intent) {
             val bluetoothDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -2446,6 +2534,43 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         intent.putExtra("name", name)
                         intent.putExtra("device", bluetoothDevice)
                         context?.sendBroadcast(intent)
+                    }
+                } else if (BluetoothDevice.ACTION_ACL_DISCONNECTED == action &&
+                    bluetoothDevice.address.equals(this@AirPodsService.device?.address, ignoreCase = true)) {
+                    BluetoothConnectionManager.aacpSocket?.let { finishAacpSession(it, "ACL disconnected") }
+                } else if ("android.bluetooth.a2dp.profile.action.ACTIVE_DEVICE_CHANGED" == action &&
+                    bluetoothDevice.address.equals(this@AirPodsService.device?.address, ignoreCase = true)) {
+                    val generation = routingState.generation
+                    if (canUseLocalAudioRoute(generation) && routingState.consumeResume(generation, profileActive = true)) {
+                        MediaController.resumeAfterRouteConfirmation()
+                    }
+                } else if (BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED == action &&
+                    intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1) == BluetoothProfile.STATE_CONNECTED &&
+                    bluetoothDevice.address.equals(this@AirPodsService.device?.address, ignoreCase = true)) {
+                    if (canUseLocalAudioRoute()) connectAudio(this@AirPodsService, bluetoothDevice)
+                } else if (BluetoothA2dp.ACTION_PLAYING_STATE_CHANGED == action) {
+                    val state = intent.getIntExtra(
+                        BluetoothProfile.EXTRA_STATE, BluetoothA2dp.STATE_NOT_PLAYING
+                    )
+                    val airPodsMac = this@AirPodsService.device?.address ?: macAddress
+                    if (
+                        state == BluetoothA2dp.STATE_PLAYING &&
+                        airPodsMac.isNotEmpty() &&
+                        bluetoothDevice.address.equals(airPodsMac, ignoreCase = true)
+                    ) {
+                        if (!canUseLocalAudioRoute()) {
+                            Log.d("SmartRouting", "PASSIVE A2DP STARTED; no authorized local claim")
+                            return
+                        }
+                        Log.d(TAG, "Local AirPods A2DP started during an authorized local route")
+                        aacpManager.sendControlCommand(
+                            AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION.value,
+                            byteArrayOf(0x01)
+                        )
+                        if (localMac.isNotEmpty()) {
+                            aacpManager.sendMediaInformataion(localMac)
+                        }
+                        refreshAacpControlSession("local AirPods A2DP playback started")
                     }
                 }
             }
@@ -2511,33 +2636,51 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
 
     private fun reinforceLocalPlaybackRoute(reason: String) {
-        Log.d(TAG, "Reinforcing local playback route: $reason")
-        aacpManager.sendControlCommand(
-            AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION.value, 1
-        )
-        aacpManager.sendMediaInformataion(localMac, streamingState = true)
+        if (!canUseLocalAudioRoute()) return
+        Log.d("SmartRouting", "Ensuring local playback route: $reason")
         connectAudio(this, device)
-
-        CoroutineScope(Dispatchers.IO).launch {
-            delay(300)
-            aacpManager.sendMediaInformataion(localMac, streamingState = true)
-            delay(700)
-            MediaController.sendPlay(replayWhenPaused = true)
-            delay(1000)
-            connectAudio(this@AirPodsService, device)
-            aacpManager.sendMediaInformataion(localMac, streamingState = true)
-            MediaController.sendPlay(force = true)
-        }
+        aacpManager.sendMediaInformataion(localMac, streamingState = MediaController.getMusicActive())
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
     @SuppressLint("MissingPermission", "HardwareIds")
     fun takeOver(
         takingOverFor: String,
-        manualTakeOverAfterReversed: Boolean = false,
-        startHeadTrackingAgain: Boolean = false
+        manualTakeOverAfterReversed: Boolean = false
     ) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            routingScope.launch { takeOver(takingOverFor, manualTakeOverAfterReversed) }
+            return
+        }
+        if (destroyed) return
+        // Restoring call audio on our already-owned route is not a remote takeover.
+        if (takingOverFor == "call" && aacpManager.owns && routingState.owner == SmartRoutingState.Owner.LOCAL) {
+            connectAudio(this, device, includeHeadset = true)
+            return
+        }
+        val manualTakeover = takingOverFor == "reverse" || manualTakeOverAfterReversed
+        val automaticTakeoverEnabled = sharedPreferences.getBoolean(
+            "smart_routing_auto_takeover", false
+        )
+
+        if (!manualTakeover && !automaticTakeoverEnabled) {
+            Log.d(TAG, "Not taking over: automatic Smart Routing takeover is disabled")
+            return
+        }
+
+        val shouldTakeOverPhoneState = when (takingOverFor) {
+            "music" -> config.takeoverWhenMediaStart
+            "call" -> config.takeoverWhenRingingCall
+            else -> false
+        }
+
+        if (!manualTakeover && !shouldTakeOverPhoneState) {
+            Log.d(TAG, "Not taking over audio: phone state takeover is disabled")
+            return
+        }
+
         if (takingOverFor == "reverse") {
+            beginLocalRoute("manual reverse")
             aacpManager.sendControlCommand(
                 AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION.value, 1
             )
@@ -2552,6 +2695,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 this@AirPodsService, device
             )
             otherDeviceTookOver = false
+            refreshAacpControlSession("manual Smart Routing takeover")
+            Log.d(TAG, "Manual Smart Routing takeover request sent")
+            return
         }
         val ownsConnection = aacpManager.getControlCommandStatus(AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION)?.value?.get(0)?.toInt()
         Log.d(
@@ -2566,7 +2712,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 it.type != AACPManager.Companion.AudioSourceType.NONE &&
                         !it.mac.equals(localMac, ignoreCase = true)
             } == true
-            if (ownsConnection != 1 || audioSourceIsOtherDevice) {
+            if (ownsConnection != 1 || audioSourceIsOtherDevice || routingState.owner == SmartRoutingState.Owner.REMOTE) {
                 if (disconnectedBecauseReversed) {
                     if (manualTakeOverAfterReversed) {
                         Log.d(TAG, "forcefully taking over despite reverse as user requested")
@@ -2580,6 +2726,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     }
                 }
 
+                beginLocalRoute("takeover for $takingOverFor", resumeMedia = takingOverFor == "music" &&
+                    (MediaController.getMusicActive() || MediaController.iPausedTheMedia))
                 Log.d(
                     TAG,
                     "already connected locally, hijacking connection by asking AirPods " +
@@ -2610,32 +2758,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     IslandType.CONNECTED
                 )
 
-                CoroutineScope(Dispatchers.IO).launch {
-                    delay(250)
-                    if (takingOverFor == "music") {
-                        aacpManager.sendMediaInformataion(localMac, streamingState = true)
-                    }
-                    delay(500) // a2dp takes time, and so does taking control + AirPods pause it for no reason after connecting
-                    if (takingOverFor == "music") {
-                        Log.d(TAG, "Resuming music after taking control")
-                        MediaController.sendPlay(replayWhenPaused = true)
-                    } else if (startHeadTrackingAgain) {
-                        Log.d(TAG, "Starting head tracking again after taking control")
-                        Handler(Looper.getMainLooper()).postDelayed({
-                            startHeadTracking()
-                        }, 500)
-                    }
-                    delay(1000) // should ideally have a callback when it's taken over because for some reason android doesn't dispatch when it's paused
-                    if (takingOverFor == "music") {
-                        Log.d(TAG, "resuming again just in case")
-                        MediaController.sendPlay(force = true)
-                        aacpManager.sendMediaInformataion(localMac, streamingState = true)
-                    }
-                }
             } else {
                 Log.d(
                     TAG, "Already connected locally and already own connection, skipping takeover"
                 )
+                routingState.confirmLocal()
+                MediaController.localRouteConfirmed()
                 if (takingOverFor == "music") {
                     reinforceLocalPlaybackRoute("already-own takeover guard")
                 }
@@ -2659,17 +2787,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             return
         }
 
-        val shouldTakeOverPState = when (takingOverFor) {
-            "music" -> config.takeoverWhenMediaStart
-            "call" -> config.takeoverWhenRingingCall
-            else -> false
-        }
-
-        if (!shouldTakeOverPState) {
-            Log.d(TAG, "Not taking over audio, phone state takeover disabled")
-            return
-        }
-
         val shouldTakeOver = when (bleManager.getMostRecentStatus()?.connectionState) {
             "Disconnected" -> config.takeoverWhenDisconnected
             "Idle" -> config.takeoverWhenIdle
@@ -2680,11 +2797,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             else -> false
         }
 
-        if (!shouldTakeOver) {
+        if (!manualTakeover && !shouldTakeOver) {
             Log.d(TAG, "Not taking over audio, airpods state takeover disabled")
             return
         }
 
+        beginLocalRoute("connect for $takingOverFor", resumeMedia = takingOverFor == "music" && MediaController.getMusicActive())
         if (takingOverFor == "music") {
             Log.d(TAG, "Pausing music so that it doesn't play through speakers")
             MediaController.pausedWhileTakingOver = true
@@ -2732,11 +2850,67 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 //        CrossDevice.isAvailable = false
     }
 
+    private fun refreshAacpControlSession(reason: String) {
+        val socket = BluetoothConnectionManager.aacpSocket ?: return
+        val generation = routingState.generation
+        if (!socket.isConnected || !canUseLocalAudioRoute(generation)) return
+        val now = SystemClock.elapsedRealtime()
+        synchronized(this) {
+            if (lastAacpControlRefreshAt != 0L && now - lastAacpControlRefreshAt < 2_000L) return
+            lastAacpControlRefreshAt = now
+        }
+        routingScope.launch {
+            delay(350)
+            if (BluetoothConnectionManager.aacpSocket !== socket || !socket.isConnected ||
+                !canUseLocalAudioRoute(generation)) return@launch
+            Log.d("SmartRouting", "Refreshing AACP controls generation=$generation reason=$reason")
+            // Subscription refresh only: never send ownership or profile commands here.
+            aacpManager.sendPacket(aacpManager.createHandshakePacket())
+            aacpManager.sendSetFeatureFlagsPacket()
+            aacpManager.sendNotificationRequest()
+            delay(350)
+            if (BluetoothConnectionManager.aacpSocket !== socket || !socket.isConnected ||
+                !canUseLocalAudioRoute(generation)) return@launch
+            aacpManager.sendNotificationRequest()
+        }
+    }
+
+    private fun isCurrentAacpSocket(socket: BluetoothSocket): Boolean =
+        !destroyed && BluetoothConnectionManager.aacpSocket === socket && socket.isConnected
+
+    @Synchronized
+    private fun finishAacpSession(socket: BluetoothSocket, reason: String) {
+        runCatching { socket.close() }
+        if (BluetoothConnectionManager.aacpSocket !== socket) return
+        BluetoothConnectionManager.aacpSocket = null
+        val att = BluetoothConnectionManager.attSocket
+        BluetoothConnectionManager.attSocket = null
+        runCatching { att?.close() }
+        routingState.reset()
+        lastAacpControlRefreshAt = 0L
+        lastAudioSourceMac = null
+        lastAudioSourceType = null
+        otherDeviceTookOver = false
+        MediaController.resetRoutingState()
+        aacpManager.disconnected()
+        Log.d("SmartRouting", "AACP session=$aacpSessionId closed reason=$reason")
+        sendBroadcast(Intent(AirPodsNotifications.AIRPODS_DISCONNECTED).apply {
+            setPackage(packageName)
+            putExtra("aacp_session", aacpSessionId)
+        })
+    }
+
+    @Synchronized
     @SuppressLint("MissingPermission", "UnspecifiedRegisterReceiverFlag")
     fun connectToSocket(
         adapter: BluetoothAdapter, device: BluetoothDevice, manual: Boolean = false
     ) {
-        if (BluetoothConnectionManager.aacpSocket != null && BluetoothConnectionManager.aacpSocket?.isConnected == true) return
+        if (destroyed) return
+        if (BluetoothConnectionManager.aacpSocket?.isConnected == true) {
+            Log.d(TAG, "AACP socket is already connected, skipping duplicate request")
+            return
+        }
+        BluetoothConnectionManager.aacpSocket?.let { finishAacpSession(it, "stale socket") }
         Log.d(TAG, "<LogCollector:Start> Connecting to socket")
         val uuid: ParcelUuid = ParcelUuid.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a")
 //        if (!isConnectedLocally) {
@@ -2754,16 +2928,34 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                     try {
                         socket.connect()
                         this@AirPodsService.device = device
-                        val xposedRemotePref = XposedRemotePrefProvider.create()
-                        val attSocket = if (xposedRemotePref.getBoolean("vendor_id_hook", false)) {
-                            createBluetoothSocket(
-                                adapter,
-                                device,
-                                ParcelUuid.fromString("00000000-0000-0000-0000-000000000000"),
-                                31
-                            )
+                        BluetoothConnectionManager.aacpSocket = socket
+                        aacpSessionId++
+                        lastAacpControlRefreshAt = 0L
+                        val useVendorAttSocket = XposedRemotePrefProvider.create().getBoolean(
+                            "vendor_id_hook", false
+                        ) && sharedPreferences.getBoolean("vendor_att_socket", false)
+                        val attSocket = if (useVendorAttSocket) {
+                            var optionalSocket: BluetoothSocket? = null
+                            try {
+                                createBluetoothSocket(
+                                    adapter,
+                                    device,
+                                    ParcelUuid.fromString("00000000-0000-0000-0000-000000000000"),
+                                    31
+                                ).also {
+                                    optionalSocket = it
+                                    it.connect()
+                                }
+                            } catch (e: Exception) {
+                                runCatching { optionalSocket?.close() }
+                                Log.w(
+                                    TAG,
+                                    "Optional PSM 31 channel failed; continuing with AACP only: ${e.message}"
+                                )
+                                null
+                            }
                         } else null
-                        attSocket?.connect()
+                        BluetoothConnectionManager.attSocket = attSocket
 
                         if (attSocket != null) {
                             attManager.startReader()
@@ -2772,8 +2964,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             attManager.readCharacteristic(ATTHandles.HEARING_AID)
                         }
 
-                        BluetoothConnectionManager.aacpSocket = socket
-                        BluetoothConnectionManager.attSocket = attSocket
                         XiaomiBatteryIslandPublisher.connected(
                             this@AirPodsService,
                             device.address,
@@ -2813,7 +3003,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                 )
                             }
                         }
-                        sendBroadcast(Intent(AirPodsNotifications.AIRPODS_L2CAP_CONNECTED))
+                        sendBroadcast(Intent(AirPodsNotifications.AIRPODS_L2CAP_CONNECTED).apply {
+                            setPackage(packageName)
+                        })
                     } catch (e: Exception) {
 //                        sharedPreferences.edit { putBoolean("connection_successful", false) }
                         Log.d(
@@ -2826,12 +3018,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         } else {
                             showSocketConnectionFailureNotification("Couldn't connect to socket: ${e.localizedMessage}")
                         }
+                        finishAacpSession(socket, "connection setup failed")
                         return@withTimeout
 //                            throw e // lol how did i not catch this before... gonna comment this line instead of removing to preserve history
                     }
                 }
             }
             if (!socket.isConnected) {
+                finishAacpSession(socket, "connection did not open")
                 Log.d(TAG, "<LogCollector:Complete:Failed> socket not connected")
                 if (manual) {
                     sendToast(
@@ -2843,7 +3037,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 return
             }
             this@AirPodsService.device = device
-            BluetoothConnectionManager.aacpSocket?.let {
+            socket.let {
                 aacpManager.sendPacket(aacpManager.createHandshakePacket())
                 aacpManager.sendSetFeatureFlagsPacket()
                 aacpManager.sendNotificationRequest()
@@ -2851,17 +3045,23 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 aacpManager.sendRequestProximityKeys((AACPManager.Companion.ProximityKeyType.IRK.value + AACPManager.Companion.ProximityKeyType.ENC_KEY.value).toByte())
                 CoroutineScope(Dispatchers.IO).launch {
                     delay(200)
+                    if (!isCurrentAacpSocket(socket)) return@launch
                     aacpManager.sendPacket(aacpManager.createHandshakePacket())
                     delay(200)
+                    if (!isCurrentAacpSocket(socket)) return@launch
                     aacpManager.sendSetFeatureFlagsPacket()
                     delay(200)
+                    if (!isCurrentAacpSocket(socket)) return@launch
                     aacpManager.sendNotificationRequest()
                     delay(200)
+                    if (!isCurrentAacpSocket(socket)) return@launch
                     aacpManager.sendSomePacketIDontKnowWhatItIs()
                     delay(200)
+                    if (!isCurrentAacpSocket(socket)) return@launch
                     aacpManager.sendRequestProximityKeys((AACPManager.Companion.ProximityKeyType.IRK.value + AACPManager.Companion.ProximityKeyType.ENC_KEY.value).toByte())
                     if (!handleIncomingCallOnceConnected) startHeadTracking() else handleIncomingCall()
                     Handler(Looper.getMainLooper()).postDelayed({
+                        if (!isCurrentAacpSocket(socket)) return@postDelayed
                         aacpManager.sendPacket(aacpManager.createHandshakePacket())
                         aacpManager.sendSetFeatureFlagsPacket()
                         aacpManager.sendNotificationRequest()
@@ -2877,10 +3077,11 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
                     setupStemActions()
 
-                    while (socket.isConnected) {
+                    while (isCurrentAacpSocket(socket)) {
                         try {
                             val buffer = ByteArray(1024)
                             val bytesRead = it.inputStream.read(buffer)
+                            if (!isCurrentAacpSocket(socket)) return@launch
                             var data: ByteArray
                             if (bytesRead > 0) {
                                 data = buffer.copyOfRange(0, bytesRead)
@@ -2897,7 +3098,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                     batteryNotification.getBattery()
                                 )
 
-                                aacpManager.receivePacket(data)
+                                // A malformed control packet is not evidence of a transport disconnect.
+                                try {
+                                    aacpManager.receivePacket(data)
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Ignoring malformed AACP packet (${data.size} bytes): ${e.message}")
+                                }
 
                                 if (!isHeadTrackingData(data)) {
                                     Log.d("AirPodsData", "Data received: $formattedHex")
@@ -2905,35 +3111,21 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                                 }
 
                             } else if (bytesRead == -1) {
-                                Log.d("AirPodsService", "socket closed (bytesRead = -1)")
-                                sendBroadcast(Intent(AirPodsNotifications.AIRPODS_DISCONNECTED).apply {
-                                    setPackage(packageName)
-                                })
-                                aacpManager.disconnected()
+                                finishAacpSession(socket, "eof")
                                 return@launch
                             }
                         } catch (e: Exception) {
-                            Log.w(TAG, "Error reading data, we have probably disconnected.")
-                            e.printStackTrace()
-                            sendBroadcast(Intent(AirPodsNotifications.AIRPODS_DISCONNECTED).apply {
-                                setPackage(packageName)
-                            })
-                            aacpManager.disconnected()
+                            Log.w(TAG, "AACP read failed: ${e.message}")
+                            finishAacpSession(socket, "read error")
                             return@launch
                         }
-
                     }
-                    Log.d("AirPods Service", "socket closed")
-//                        isConnectedLocally = false
-                    aacpManager.disconnected()
-                    updateNotificationContent(false)
-                    sendBroadcast(Intent(AirPodsNotifications.AIRPODS_DISCONNECTED).apply {
-                        setPackage(packageName)
-                    })
+                    finishAacpSession(socket, "socket closed")
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            finishAacpSession(socket, "connection exception")
             Log.d(TAG, "Failed to connect to BluetoothConnectionManager.aacpSocket?: ${e.message}")
             showSocketConnectionFailureNotification("Failed to establish connection: ${e.localizedMessage}")
 //                isConnectedLocally = false
@@ -3009,10 +3201,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
                 override fun onServiceDisconnected(profile: Int) {}
             }, BluetoothProfile.A2DP)
-            try {
-                device?.disconnect()
-            } catch (e: Exception) {
-                Log.w(TAG, "device.disconnect() failed, $e")
+            if (Build.VERSION.SDK_INT >= 37) {
+                try {
+                    device?.disconnect()
+                } catch (e: Exception) {
+                    Log.w(TAG, "device.disconnect() failed, $e")
+                }
             }
         }
         if (checkSelfPermission("android.permission.MODIFY_PHONE_STATE") == PackageManager.PERMISSION_GRANTED){
@@ -3062,12 +3256,14 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
 
     fun disconnectAudio(context: Context, device: BluetoothDevice?) {
+        val generation = routingState.generation
         val bluetoothAdapter = context.getSystemService(BluetoothManager::class.java).adapter
         if (checkSelfPermission("android.permission.BLUETOOTH_PRIVILEGED") == PackageManager.PERMISSION_GRANTED) {
             bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
                 override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                     if (profile == BluetoothProfile.A2DP) {
                         try {
+                            if (generation != routingState.generation || destroyed) return
                             if (proxy.getConnectionState(device) == BluetoothProfile.STATE_DISCONNECTED) {
                                 Log.d(TAG, "Already disconnected from A2DP")
                                 return
@@ -3095,6 +3291,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                     if (profile == BluetoothProfile.HEADSET) {
                         try {
+                            if (generation != routingState.generation || destroyed) return
                             val method =
                                 proxy.javaClass.getMethod(
                                     "setConnectionPolicy",
@@ -3118,10 +3315,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
     }
 
-    private fun setProfileActiveDevice(proxy: BluetoothProfile, device: BluetoothDevice?, profileName: String) {
+    private fun setProfileActiveDevice(proxy: BluetoothProfile, device: BluetoothDevice?, profileName: String): Boolean {
         if (device == null) {
             Log.d(TAG, "not setting $profileName active device, device is null")
-            return
+            return false
         }
 
         try {
@@ -3134,144 +3331,60 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             Log.d(TAG, "calling $profileName.setActiveDevice for ${device.address}")
             val result = setActiveDeviceMethod.invoke(proxy, device)
             Log.d(TAG, "$profileName.setActiveDevice result: $result")
+            val active = proxy.javaClass.getMethod("getActiveDevice").invoke(proxy) as? BluetoothDevice
+            return active?.address.equals(device.address, ignoreCase = true)
         } catch (e: NoSuchMethodException) {
             Log.d(TAG, "$profileName.setActiveDevice is not available")
         } catch (e: Exception) {
             Log.w(TAG, "failed to set $profileName active device: ${e.message}")
         }
+        return false
     }
 
-    private fun scheduleSetAudioActiveDevices(context: Context, device: BluetoothDevice?) {
-        if (device == null) return
-
-        listOf(250L, 1000L, 2500L).forEach { delayMs ->
-            scheduleSetAudioActiveDevices(context, device, delayMs)
+    fun connectAudio(context: Context, device: BluetoothDevice?, includeHeadset: Boolean = false) {
+        val target = device ?: return
+        val generation = routingState.generation
+        if (!canUseLocalAudioRoute(generation)) {
+            Log.d("SmartRouting", "PASSIVE connectAudio; local route is not authorized")
+            return
         }
-    }
-
-    private fun scheduleSetAudioActiveDevices(context: Context, device: BluetoothDevice, delayMs: Long) {
-        Handler(Looper.getMainLooper()).postDelayed({
-            val bluetoothAdapter = context.getSystemService(BluetoothManager::class.java).adapter
-
-            bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
+        val adapter = context.getSystemService(BluetoothManager::class.java).adapter ?: return
+        val telecomManager = context.getSystemService(TelecomManager::class.java)
+        val profiles = if (includeHeadset || runCatching { telecomManager?.isInCall == true }.getOrDefault(false) || handleIncomingCallOnceConnected) {
+            listOf(BluetoothProfile.A2DP, BluetoothProfile.HEADSET)
+        } else listOf(BluetoothProfile.A2DP)
+        profiles.forEach { requestedProfile ->
+            adapter.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
                 override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                     try {
-                        if (profile == BluetoothProfile.A2DP) {
-                            Log.d(TAG, "retrying A2DP active device after ${delayMs}ms")
-                            setProfileActiveDevice(proxy, device, "A2DP")
-                        }
-                    } finally {
-                        bluetoothAdapter.closeProfileProxy(BluetoothProfile.A2DP, proxy)
-                    }
-                }
-
-                override fun onServiceDisconnected(profile: Int) {}
-            }, BluetoothProfile.A2DP)
-
-            bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
-                override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                    try {
-                        if (profile == BluetoothProfile.HEADSET) {
-                            Log.d(TAG, "retrying HEADSET active device after ${delayMs}ms")
-                            setProfileActiveDevice(proxy, device, "HEADSET")
-                        }
-                    } finally {
-                        bluetoothAdapter.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
-                    }
-                }
-
-                override fun onServiceDisconnected(profile: Int) {}
-            }, BluetoothProfile.HEADSET)
-        }, delayMs)
-    }
-
-    fun connectAudio(context: Context, device: BluetoothDevice?) {
-        val bluetoothAdapter = context.getSystemService(BluetoothManager::class.java).adapter
-
-        bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                if (profile == BluetoothProfile.A2DP) {
-                    if (context.checkSelfPermission("android.permission.BLUETOOTH_PRIVILEGED") == PackageManager.PERMISSION_GRANTED) {
-                        try {
-                            val policyMethod = proxy.javaClass.getMethod(
-                                "setConnectionPolicy",
-                                BluetoothDevice::class.java,
-                                Int::class.java
-                            )
-                            Log.d(TAG, "calling A2DP.setConnectionPolicy for ${device?.address} to 100")
-                            policyMethod.invoke(proxy, device, 100)
-
-                            val connectMethod =
-                                proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                            connectMethod.invoke(
-                                proxy, device
-                            )
-                            setProfileActiveDevice(proxy, device, "A2DP")
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        } finally {
-                            bluetoothAdapter.closeProfileProxy(BluetoothProfile.A2DP, proxy)
-                            if (MediaController.pausedWhileTakingOver) {
-                                MediaController.sendPlay()
+                        if (!canUseLocalAudioRoute(generation)) return
+                        val state = proxy.getConnectionState(target)
+                        if (state == BluetoothProfile.STATE_DISCONNECTING) return
+                        val permission = if (profile == BluetoothProfile.A2DP) {
+                            "android.permission.BLUETOOTH_PRIVILEGED"
+                        } else "android.permission.MODIFY_PHONE_STATE"
+                        if (context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED) {
+                            proxy.javaClass.getMethod("setConnectionPolicy", BluetoothDevice::class.java, Int::class.java)
+                                .invoke(proxy, target, 100)
+                        } else if (profile == BluetoothProfile.HEADSET) return
+                        // UNKNOWN/errors are not DISCONNECTED. Do not reconnect an already-live profile.
+                        if (state == BluetoothProfile.STATE_DISCONNECTED) {
+                            proxy.javaClass.getMethod("connect", BluetoothDevice::class.java).invoke(proxy, target)
+                        } else if (state == BluetoothProfile.STATE_CONNECTED && canUseLocalAudioRoute(generation)) {
+                            val active = setProfileActiveDevice(proxy, target, if (profile == BluetoothProfile.A2DP) "A2DP" else "HEADSET")
+                            if (profile == BluetoothProfile.A2DP && routingState.consumeResume(generation, active)) {
+                                MediaController.resumeAfterRouteConfirmation()
                             }
                         }
-                    }
-                    else {
-                        try {
-                            val connectMethod =
-                                proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                            connectMethod.invoke(
-                                proxy, device
-                            )
-                            setProfileActiveDevice(proxy, device, "A2DP")
-                            Log.d(TAG, "not setting connection policy for A2DP, no BLUETOOTH_PRIVILEGED permission. just called connect")
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        } finally {
-                            bluetoothAdapter.closeProfileProxy(BluetoothProfile.A2DP, proxy)
-                        }
+                    } catch (e: Exception) {
+                        Log.w("SmartRouting", "Profile connection failed without retry: ${e.message}")
+                    } finally {
+                        adapter.closeProfileProxy(profile, proxy)
                     }
                 }
-            }
-
-            override fun onServiceDisconnected(profile: Int) {}
-        }, BluetoothProfile.A2DP)
-
-        bluetoothAdapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                if (profile == BluetoothProfile.HEADSET) {
-                    if (checkSelfPermission("android.permission.MODIFY_PHONE_STATE") == PackageManager.PERMISSION_GRANTED) {
-                        try {
-                            val policyMethod = proxy.javaClass.getMethod(
-                                "setConnectionPolicy",
-                                BluetoothDevice::class.java,
-                                Int::class.java
-                            )
-                            Log.d(
-                                TAG,
-                                "calling HEADSET.setConnectionPolicy for ${device?.address} to 100"
-                            )
-                            policyMethod.invoke(proxy, device, 100)
-                            val connectMethod =
-                                proxy.javaClass.getMethod("connect", BluetoothDevice::class.java)
-                            connectMethod.invoke(proxy, device)
-                            setProfileActiveDevice(proxy, device, "HEADSET")
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        } finally {
-                            bluetoothAdapter.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
-                        }
-                    } else {
-                        Log.d(TAG, "not setting connection policy for HEADSET, no MODIFIY_PHONE_STATE permission")
-                        bluetoothAdapter.closeProfileProxy(BluetoothProfile.HEADSET, proxy)
-                    }
-                }
-            }
-
-            override fun onServiceDisconnected(profile: Int) {}
-        }, BluetoothProfile.HEADSET)
-
-        scheduleSetAudioActiveDevices(context, device)
+                override fun onServiceDisconnected(profile: Int) {}
+            }, requestedProfile)
+        }
     }
 
     fun setName(name: String) {
@@ -3289,6 +3402,13 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
+        destroyed = true
+        BluetoothConnectionManager.aacpSocket?.let { finishAacpSession(it, "service destroyed") }
+        routingState.reset()
+        routingScope.cancel()
+        MediaController.resetRoutingState()
+        pendingAudioResumeReceiver?.let { runCatching { unregisterReceiver(it) } }
+        pendingAudioResumeReceiver = null
         XiaomiBatteryIslandPublisher.clear(this)
         clearPacketLogs()
         Log.d(TAG, "Service stopped is being destroyed for some reason!")
@@ -3338,10 +3458,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION
             )?.value?.get(0)?.toInt() != 1
         ) {
-            takeOver("call", startHeadTrackingAgain = true)
-            Log.d(TAG, "Taking over for head tracking")
+            Log.w(TAG, "Not taking over ownership for head tracking; tracking might not work")
         } else {
-            Log.w(TAG, "Will not be taking over for head tracking, might not work.")
+            Log.d(TAG, "Already own the connection; starting head tracking")
         }
         if (useAlternatePackets) {
             aacpManager.sendDataPacket(aacpManager.createAlternateStartHeadTrackingPacket())
@@ -3365,6 +3484,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     @SuppressLint("MissingPermission")
     fun reconnectFromSavedMac() {
+        beginLocalRoute("manual reconnect")
         val bluetoothAdapter = getSystemService(BluetoothManager::class.java).adapter
         device = bluetoothAdapter.bondedDevices.find {
             it.address == macAddress

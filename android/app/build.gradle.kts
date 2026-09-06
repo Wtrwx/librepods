@@ -46,6 +46,9 @@ android {
     namespace = "me.kavishdevar.librepods"
     compileSdk = 37
 
+    // Protocol tests exercise packet reception with Android logging stubbed on the JVM.
+    testOptions.unitTests.isReturnDefaultValues = true
+
     defaultConfig {
         applicationId = "me.kavishdevar.librepods"
         targetSdk = 37

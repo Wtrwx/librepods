@@ -51,25 +51,18 @@ object MediaController {
     private var lastPlaybackCallbackAt: Long = 0L
     private var lastKnownIsMusicActive: Boolean? = null
 
-    private const val PAUSED_FOR_OTHER_DEVICE_CLEAR_MS = 5000L
     private const val OWNERSHIP_RETRY_MS = 3200L
-    private val clearPausedForOtherDeviceRunnable = Runnable {
-        pausedForOtherDevice = false
-        Log.d("MediaController", "Cleared pausedForOtherDevice after timeout, resuming normal playback monitoring")
-    }
+    private var deferredTakeoverGeneration = -1L
     private val deferredTakeOverRunnable = Runnable {
         if (!this::audioManager.isInitialized) return@Runnable
         if (!audioManager.isMusicActive) {
             Log.d("MediaController", "Deferred take-over skipped because music is no longer active")
             return@Runnable
         }
+        val service = ServiceManager.getService() ?: return@Runnable
+        if (service.routingGeneration() != deferredTakeoverGeneration) return@Runnable
         Log.d("MediaController", "Deferred take-over after ownership-loss guard")
-        recentlyLostOwnership = false
-        pausedForOtherDevice = false
-        userPlayedTheMedia = true
-        if (!pausedWhileTakingOver) {
-            ServiceManager.getService()?.takeOver("music")
-        }
+        if (!pausedWhileTakingOver) service.takeOver("music")
     }
 
     private var relativeVolume: Boolean = false
@@ -108,7 +101,7 @@ object MediaController {
 
         sharedPreferences.registerOnSharedPreferenceChangeListener(preferenceChangeListener)
 
-        audioManager.registerAudioPlaybackCallback(cb, null)
+        audioManager.registerAudioPlaybackCallback(cb, handler)
     }
 
     val cb = object : AudioManager.AudioPlaybackCallback() {
@@ -163,18 +156,14 @@ object MediaController {
             Log.d("MediaController", "Has new music or movie: $hasNewMusicOrMovie")
 
             if (pausedForOtherDevice) {
-                handler.removeCallbacks(clearPausedForOtherDeviceRunnable)
-                handler.postDelayed(clearPausedForOtherDeviceRunnable, PAUSED_FOR_OTHER_DEVICE_CLEAR_MS)
-
                 if (isActive) {
                     Log.d("MediaController", "Detected play while pausedForOtherDevice; attempting to take over")
                     if (recentlyLostOwnership && hasNewMusicOrMovie) {
                         Log.d("MediaController", "Recently lost ownership; scheduling deferred take-over instead of dropping user play")
                         handler.removeCallbacks(deferredTakeOverRunnable)
+                        deferredTakeoverGeneration = ServiceManager.getService()?.routingGeneration() ?: -1L
                         handler.postDelayed(deferredTakeOverRunnable, OWNERSHIP_RETRY_MS)
                     } else if (hasNewMusicOrMovie) {
-                        pausedForOtherDevice = false
-                        userPlayedTheMedia = true
                         if (!pausedWhileTakingOver) {
                             ServiceManager.getService()?.takeOver("music")
                         }
@@ -182,14 +171,14 @@ object MediaController {
                         Log.d("MediaController", "Skipping take-over due to recent ownership loss or no new music/movie")
                     }
                 } else {
-                    Log.d("MediaController", "Still not active while pausedForOtherDevice; will clear state after timeout")
+                    Log.d("MediaController", "Still paused for the remote device; waiting for a local route request")
                 }
 
                 lastKnownIsMusicActive = isActive
                 return
             }
 
-            if (configs != null && !iPausedTheMedia) {
+            if (configs != null && !iPausedTheMedia && ServiceManager.getService()?.canUseLocalAudioRoute() == true) {
                 val localMac = ServiceManager.getService()?.localMac ?: return
                 if (localMac == "") return
                 ServiceManager.getService()?.aacpManager?.sendMediaInformataion(
@@ -197,11 +186,11 @@ object MediaController {
                     isActive
                 )
                 Log.d("MediaController", "User changed media state themselves; will wait for ear detection pause before auto-play")
+                val service = ServiceManager.getService()
+                val generation = service?.routingGeneration()
                 handler.postDelayed({
+                    if (ServiceManager.getService() !== service || service?.routingGeneration() != generation) return@postDelayed
                     userPlayedTheMedia = audioManager.isMusicActive
-                    if (audioManager.isMusicActive) {
-                        pausedForOtherDevice = false
-                    }
                 }, 7)
             }
 
@@ -214,6 +203,7 @@ object MediaController {
                     } else {
                         Log.d("MediaController", "Recently lost ownership; scheduling deferred take-over")
                         handler.removeCallbacks(deferredTakeOverRunnable)
+                        deferredTakeoverGeneration = ServiceManager.getService()?.routingGeneration() ?: -1L
                         handler.postDelayed(deferredTakeOverRunnable, OWNERSHIP_RETRY_MS)
                     }
                 }
@@ -224,8 +214,54 @@ object MediaController {
     }
 
     @Synchronized
+    fun remoteRouteRequested() {
+        handler.removeCallbacks(deferredTakeOverRunnable)
+        deferredTakeoverGeneration = -1L
+        lastPlayWithReplay = false
+        pausedWhileTakingOver = false
+        pausedForOtherDevice = true
+        recentlyLostOwnership = true
+        if (this::audioManager.isInitialized) sendPause(force = true)
+        val generation = ServiceManager.getService()?.routingGeneration()
+        handler.postDelayed({
+            if (ServiceManager.getService()?.routingGeneration() == generation) {
+                recentlyLostOwnership = false
+            }
+        }, 3000L)
+    }
+
+    @Synchronized
+    fun localRouteRequested() {
+        handler.removeCallbacks(deferredTakeOverRunnable)
+        deferredTakeoverGeneration = -1L
+        pausedForOtherDevice = false
+        recentlyLostOwnership = false
+        lastPlayWithReplay = false
+    }
+
+    @Synchronized
+    fun localRouteConfirmed() {
+        localRouteRequested()
+    }
+
+    @Synchronized
+    fun resumeAfterRouteConfirmation() {
+        iPausedTheMedia = true
+        sendPlay()
+    }
+
+    @Synchronized
+    fun resetRoutingState() {
+        localRouteRequested()
+        pausedWhileTakingOver = false
+        iPausedTheMedia = false
+        userPlayedTheMedia = false
+        lastKnownIsMusicActive = null
+    }
+
+    @Synchronized
     fun getMusicActive(): Boolean {
-        return audioManager.isMusicActive
+        return this::audioManager.isInitialized && audioManager.isMusicActive
     }
 
     @Synchronized
@@ -299,6 +335,15 @@ object MediaController {
 
     @Synchronized
     fun sendPlay(replayWhenPaused: Boolean = false, force: Boolean = false) {
+        if (!this::audioManager.isInitialized || ServiceManager.getService()?.canResumeLocalMedia() != true) {
+            Log.d("MediaController", "Skipping play without a confirmed local audio route")
+            return
+        }
+        if (audioManager.isMusicActive) {
+            Log.d("MediaController", "Skipping play because media is already active")
+            pausedWhileTakingOver = false
+            return
+        }
         Log.d("MediaController", "Sending play with iPausedTheMedia: $iPausedTheMedia, replayWhenPaused: $replayWhenPaused, force: $force")
         if (replayWhenPaused) {
             lastPlayWithReplay = true

@@ -159,8 +159,12 @@
     <string name="use_alternate_head_tracking_packets">Use alternate head tracking packets</string>
     <string name="use_alternate_head_tracking_packets_description">Enable this if head tracking doesn\'t work for you. This sends different data to AirPods for requesting/stopping head tracking data.</string>
     <string name="act_as_an_apple_device">Act as an Apple device</string>
-    <string name="act_as_an_apple_device_description">Enables multi-device connectivity and Accessibility features like customizing transparency mode (amplification, tone, ambient noise reduction, conversation boost, and EQ)</string>
+    <string name="act_as_an_apple_device_description">Advertise an Apple Bluetooth identity for multi-device connectivity. The two riskier behaviors below can be enabled separately.</string>
     <string name="act_as_an_apple_device_warning">Might be unstable!! A maximum of two devices can be connected to your AirPods. If you are using with an Apple device like an iPad or Mac, then please connect that device first and then your Android.</string>
+    <string name="vendor_att_socket">Accessibility control channel</string>
+    <string name="vendor_att_socket_description">Needed for some hearing and custom transparency settings. Disabled by default for Mac + Android connection stability. Reconnect your AirPods after changing this setting.</string>
+    <string name="smart_routing_auto_takeover">Allow automatic Smart Routing takeover</string>
+    <string name="smart_routing_auto_takeover_description">Allows playback or calls to request ownership from another device. Manual “move back” remains available when this is off.</string>
     <string name="reset_hook_offset">Reset Hook Offset</string>
     <string name="reset_hook_offset_description">This will clear the current hook offset and require you to go through the setup process again. Are you sure you want to continue?</string>
     <string name="reset">Reset</string>

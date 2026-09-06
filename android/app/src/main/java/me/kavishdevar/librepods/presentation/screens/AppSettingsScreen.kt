@@ -381,6 +381,20 @@ fun AppSettingsScreen(
                     viewModel.setVendorIdHook(enabled)
                 }
             )
+            if (state.vendorIdHook) {
+                StyledToggle(
+                    label = stringResource(R.string.vendor_att_socket),
+                    description = stringResource(R.string.vendor_att_socket_description),
+                    checked = state.vendorAttSocket,
+                    onCheckedChange = viewModel::setVendorAttSocket
+                )
+                StyledToggle(
+                    label = stringResource(R.string.smart_routing_auto_takeover),
+                    description = stringResource(R.string.smart_routing_auto_takeover_description),
+                    checked = state.smartRoutingAutoTakeover,
+                    onCheckedChange = viewModel::setSmartRoutingAutoTakeover
+                )
+            }
         }
 
         if (!BuildConfig.PLAY_BUILD) {

@@ -214,19 +214,19 @@ class AACPManager {
     }
 
     private fun setControlCommandStatusValue(
-        identifier: ControlCommandIdentifiers, value: ByteArray
+        identifier: ControlCommandIdentifiers,
+        value: ByteArray,
+        confirmedByAirPods: Boolean = false
     ) {
-        val existingStatus = getControlCommandStatus(identifier)
-        if (existingStatus?.value.contentEquals(value)) {
-            controlCommandStatusList.remove(existingStatus)
-        }
-        controlCommandListeners[identifier]?.forEach { listener ->
-            listener.onControlCommandReceived(ControlCommand(identifier.value, value))
-        }
-        controlCommandStatusList.add(ControlCommandStatus(identifier, value))
-
+        // Sending an ownership request is not confirmation that the audio route moved.
+        if (identifier == ControlCommandIdentifiers.OWNS_CONNECTION && !confirmedByAirPods) return
+        controlCommandStatusList.removeAll { it.identifier == identifier }
+        controlCommandStatusList.add(ControlCommandStatus(identifier, value.copyOf()))
         if (identifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
-            owns = value.isNotEmpty() && value[0] == 0x01.toByte()
+            owns = value.firstOrNull() == 0x01.toByte()
+        }
+        controlCommandListeners[identifier]?.toList()?.forEach { listener ->
+            listener.onControlCommandReceived(ControlCommand(identifier.value, value))
         }
     }
 
@@ -244,6 +244,7 @@ class AACPManager {
         fun onOwnershipChangeReceived(owns: Boolean)
         fun onConnectedDevicesReceived(connectedDevices: List<ConnectedDevice>)
         fun onOwnershipToFalseRequest(sender: String, reasonReverseTapped: Boolean)
+        fun onRemoteStreamingStateChanged(sender: String, isStreaming: Boolean)
         fun onShowNearbyUI(sender: String)
         fun onHeadphoneAccommodationReceived(eqData: FloatArray)
         fun onCustomEqReceived(customEq: CustomEq)
@@ -432,7 +433,8 @@ class AACPManager {
                 }
                 setControlCommandStatusValue(
                     ControlCommandIdentifiers.fromByte(controlCommand.identifier) ?: return,
-                    controlCommand.value
+                    controlCommand.value,
+                    confirmedByAirPods = true
                 )
                 Log.d(
                     TAG,
@@ -458,18 +460,6 @@ class AACPManager {
 
                 val controlCommandIdentifier =
                     ControlCommandIdentifiers.fromByte(controlCommand.identifier)
-                if (controlCommandIdentifier != null) {
-                    controlCommandListeners[controlCommandIdentifier]?.forEach { listener ->
-                        Log.d(TAG, "calling listener for ${controlCommandIdentifier.name}")
-                        listener.onControlCommandReceived(controlCommand)
-                    }
-                } else {
-                    Log.w(
-                        TAG,
-                        "Unknown control command identifier: ${controlCommand.identifier.toHexString()}"
-                    )
-                }
-
                 if (controlCommandIdentifier == ControlCommandIdentifiers.OWNS_CONNECTION) {
                     callback?.onOwnershipChangeReceived(owns)
                 }
@@ -512,6 +502,7 @@ class AACPManager {
                     audioSource = AudioSource(mac, type)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error parsing audio source response: ${e.message}")
+                    return
                 }
                 callback?.onAudioSourceReceived(packet)
             }
@@ -524,6 +515,10 @@ class AACPManager {
 
             Opcodes.SMART_ROUTING_RESP -> {
                 val packetString = packet.decodeToString()
+                if (packet.size < 12) {
+                    Log.w(TAG, "Ignoring truncated Smart Routing sender")
+                    return
+                }
                 val sender =
                     packet.sliceArray(6..11).reversedArray().joinToString(":") { "%02X".format(it) }
 
@@ -549,6 +544,11 @@ class AACPManager {
                     TAG,
                     "Smart Routing Response from $sender: $packetString, type: ${connectedDevices.find { it.mac == sender }?.type}"
                 )
+                val playbackState = parseSmartRoutingPlaybackState(packetString)
+                playbackState.hasRemotePlaybackIntent?.let { hasPlaybackIntent ->
+                    Log.d(TAG, "Smart Routing playback: $playbackState, intent=$hasPlaybackIntent")
+                    callback?.onRemoteStreamingStateChanged(sender, hasPlaybackIntent)
+                }
                 if (packetString.contains("SetOwnershipToFalse")) {
                     callback?.onOwnershipToFalseRequest(
                         sender,
@@ -1147,6 +1147,7 @@ class AACPManager {
     }
 
     @OptIn(ExperimentalStdlibApi::class)
+    @Synchronized
     fun sendPacket(packet: ByteArray): Boolean {
         try {
             Log.d(TAG, "Sending packet: ${packet.joinToString(" ") { "%02X".format(it) }}")
@@ -1217,7 +1218,7 @@ class AACPManager {
 
     fun parseAudioSourceResponse(data: ByteArray): Pair<String, AudioSourceType> {
         Log.d(TAG, "Parsing Audio Source Response: ${data.joinToString(" ") { "%02X".format(it) }}")
-        if (data.size < 9) {
+        if (data.size < 13) {
             throw IllegalArgumentException("Data array too short to parse Audio Source Response")
         }
         if (data[4] != Opcodes.AUDIO_SOURCE) {
