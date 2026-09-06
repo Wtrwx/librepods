@@ -7,34 +7,41 @@ import org.junit.Test
 class XiaomiBatteryIslandPayloadTest {
     @Test fun payloadUsesDocumentedLargeAndSmallIslandComponents() {
         val params = JSONObject(XiaomiBatteryIslandPayload.build("AirPods Pro", 83)).getJSONObject("param_v2")
-        assertEquals("bluetooth", params.getString("business"))
-        assertTrue(params.getBoolean("islandFirstFloat"))
+        assertEquals(3, params.getInt("protocol"))
+        assertEquals("librepods_battery", params.getString("business"))
+        assertEquals("83%", params.getString("ticker"))
+        // An expanded card consumes the island's whole lifetime for background apps.
+        assertFalse(params.getBoolean("islandFirstFloat"))
+        assertFalse(params.getBoolean("enableFloat"))
+        assertFalse(params.getBoolean("isShowNotification"))
+        assertFalse(params.has("baseInfo"))
         assertFalse(params.getBoolean("updatable"))
         val island = params.getJSONObject("param_island")
         assertEquals(5, island.getInt("islandTimeout"))
         assertEquals(5_500L, XiaomiBatteryIslandPayload.NOTIFICATION_TIMEOUT_MS)
-        val large = island.getJSONObject("bigIslandArea").getJSONObject("imageTextInfoLeft")
-        assertEquals("83%", large.getJSONObject("textInfo").getString("title"))
-        assertEquals("AirPods Pro", large.getJSONObject("textInfo").getString("content"))
-        assertEquals("83%", large.getJSONObject("miui.focus.paramtextInfo").getString("title"))
-        val small = island.getJSONObject("smallIslandArea").getJSONObject("imageTextInfoRight")
-        assertEquals(6, small.getInt("type"))
-        assertEquals(4, small.getJSONObject("picInfo").getInt("type"))
-        assertEquals("83", small.getJSONObject("textInfo").getString("title"))
+        val big = island.getJSONObject("bigIslandArea")
+        val left = big.getJSONObject("imageTextInfoLeft")
+        val right = big.getJSONObject("imageTextInfoRight")
+        assertFalse(left.has("textInfo"))
+        assertEquals("83%", right.getJSONObject("textInfo").getString("title"))
+        assertEquals(XiaomiBatteryIslandPayload.PICTURE_KEY, left.getJSONObject("picInfo").getString("pic"))
+        val small = island.getJSONObject("smallIslandArea").getJSONObject("combinePicInfo")
         assertEquals(XiaomiBatteryIslandPayload.PICTURE_KEY, small.getJSONObject("picInfo").getString("pic"))
-        assertEquals(XiaomiBatteryIslandPayload.PICTURE_KEY, large.getJSONObject("picInfo").getString("pic"))
+        assertEquals(83, small.getJSONObject("progressInfo").getInt("progress"))
     }
 
     @Test fun deviceNamesCannotBreakJsonOrInjectParameters() {
         val name = "小明的 \"AirPods\" \\ Pro\n🎧 {\"cancel\":true}"
         val params = JSONObject(XiaomiBatteryIslandPayload.build(name, 100)).getJSONObject("param_v2")
-        assertEquals(name, params.getJSONObject("baseInfo").getString("title"))
+        assertEquals("$name 电量 100%", params.getJSONObject("param_island").getString("appContentDescription"))
         assertFalse(params.has("cancel"))
     }
 
     @Test fun zeroBatteryRemainsZero() {
         val params = JSONObject(XiaomiBatteryIslandPayload.build("AirPods", 0)).getJSONObject("param_v2")
-        assertEquals("剩余电量 0%", params.getJSONObject("baseInfo").getString("content"))
+        assertEquals("0%", params.getString("ticker"))
+        assertEquals(0, params.getJSONObject("param_island").getJSONObject("smallIslandArea")
+            .getJSONObject("combinePicInfo").getJSONObject("progressInfo").getInt("progress"))
     }
 
     @Test(expected = IllegalArgumentException::class) fun rejectsUnknownBattery() {

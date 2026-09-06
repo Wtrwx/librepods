@@ -1,7 +1,6 @@
 package me.kavishdevar.librepods.utils
 
 import android.annotation.SuppressLint
-import android.app.Application
 import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.os.Binder
@@ -29,10 +28,7 @@ private const val DEXKIT_SO = "libdexkit.so"
 
 @SuppressLint("DiscouragedApi", "PrivateApi")
 class KotlinModule: XposedModule() {
-    private var processName: String? = null
-
     override fun onModuleLoaded(param: ModuleLoadedParam) {
-        processName = param.processName
         log(Log.INFO, TAG, "module initialized at :: ${param.processName}")
         log(Log.INFO, TAG, "framework: $frameworkName($frameworkVersionCode) API $apiVersion")
     }
@@ -63,9 +59,6 @@ class KotlinModule: XposedModule() {
         }
 
         if (param.packageName == XIAOMI_BLUETOOTH_PACKAGE) {
-            if (param.isFirstPackage && processName == XIAOMI_BLUETOOTH_PACKAGE) {
-                hookXiaomiBatteryIsland()
-            }
             hookXiaomiBluetoothExtension(param)
         }
 
@@ -75,27 +68,6 @@ class KotlinModule: XposedModule() {
 
         if (param.packageName == "com.android.settings") {
             hookSettingsController(param, "com.android.settings.bluetooth.AdvancedBluetoothDetailsHeaderController")
-        }
-    }
-
-    // Application.attach is intentionally intercepted through LSPosed, not called by an app.
-    @SuppressLint("DiscouragedPrivateApi")
-    private fun hookXiaomiBatteryIsland() {
-        try {
-            val attach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
-            hook(attach).intercept { chain ->
-                val result = chain.proceed()
-                val application = chain.thisObject as? Application
-                if (application?.packageName == XIAOMI_BLUETOOTH_PACKAGE) {
-                    Handler(Looper.getMainLooper()).post {
-                        XiaomiBatteryIslandMonitor.start(application, ::looksLikeAirPods)
-                    }
-                }
-                result
-            }
-            log(Log.INFO, TAG, "Installed Xiaomi AirPods battery island hook")
-        } catch (e: Throwable) {
-            log(Log.WARN, TAG, "Could not install battery island hook: ${e.message}")
         }
     }
 
