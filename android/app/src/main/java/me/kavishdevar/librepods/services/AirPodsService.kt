@@ -1330,6 +1330,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         )
         var justEnabledA2dp = false
         earDetectionNotification.setStatus(earDetection)
+        sendXiaomiStateBroadcast(connected = true)
         if (!canUseLocalAudioRoute()) {
             Log.d("SmartRouting", "PASSIVE ear detection; preserving remote audio route")
             return
@@ -1923,6 +1924,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             putExtra("data", ancNotification.status)
             setPackage(packageName)
         })
+        sendXiaomiStateBroadcast(connected = true)
     }
 
     fun sendBatteryBroadcast() {
@@ -2077,6 +2079,87 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         updateBatteryWidget()
         sendBatteryBroadcast()
         sendBatteryNotification()
+        sendXiaomiStateBroadcast(connected = true)
+    }
+
+    fun sendXiaomiStateBroadcast(connected: Boolean = true) {
+        val currentDevice = device ?: return
+        val mac = currentDevice.address ?: return
+        val devName = currentDevice.name ?: config.deviceName ?: "AirPods"
+
+        val batteryList = batteryNotification.getBattery()
+        val left = batteryList.find { it.component == BatteryComponent.LEFT }
+        val right = batteryList.find { it.component == BatteryComponent.RIGHT }
+        val caseBattery = batteryList.find { it.component == BatteryComponent.CASE }
+
+        val leftLevel = left?.level?.takeIf { it in 0..100 } ?: -1
+        val rightLevel = right?.level?.takeIf { it in 0..100 } ?: -1
+        val caseLevel = caseBattery?.level?.takeIf { it in 0..100 } ?: -1
+
+        val isLeftCharging = left?.status == BatteryStatus.CHARGING
+        val isRightCharging = right?.status == BatteryStatus.CHARGING
+        val isCaseCharging = caseBattery?.status == BatteryStatus.CHARGING
+
+        val earStatus = earDetectionNotification.status
+        val isLeftWearing = earStatus.isNotEmpty() && earStatus[0] == 0x00.toByte()
+        val isRightWearing = earStatus.size > 1 && earStatus[1] == 0x00.toByte()
+
+        val rawAnc = ancNotification.status
+        val xiaomiAncMode = when (rawAnc) {
+            1 -> 0
+            2 -> 1
+            3 -> 2
+            4 -> 1
+            else -> 0
+        }
+
+        try {
+            sharedPreferences.edit {
+                putString("xiaomi_mac", mac)
+                putString("xiaomi_name", devName)
+                putBoolean("xiaomi_connected", connected)
+                putInt("xiaomi_left_battery", leftLevel)
+                putInt("xiaomi_right_battery", rightLevel)
+                putInt("xiaomi_case_battery", caseLevel)
+                putBoolean("xiaomi_left_charging", isLeftCharging)
+                putBoolean("xiaomi_right_charging", isRightCharging)
+                putBoolean("xiaomi_case_charging", isCaseCharging)
+                putBoolean("xiaomi_left_wearing", isLeftWearing)
+                putBoolean("xiaomi_right_wearing", isRightWearing)
+                putInt("xiaomi_anc_mode", xiaomiAncMode)
+                putInt("xiaomi_raw_anc", rawAnc)
+                putLong("xiaomi_timestamp", System.currentTimeMillis())
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to save xiaomi SP: ${e.message}")
+        }
+
+        val intent = Intent("me.kavishdevar.librepods.AIRPODS_STATE_UPDATE").apply {
+            putExtra("mac", mac)
+            putExtra("name", devName)
+            putExtra("connected", connected)
+            putExtra("leftBattery", leftLevel)
+            putExtra("rightBattery", rightLevel)
+            putExtra("boxBattery", caseLevel)
+            putExtra("isLeftCharging", isLeftCharging)
+            putExtra("isRightCharging", isRightCharging)
+            putExtra("isBoxCharging", isCaseCharging)
+            putExtra("isLeftWearing", isLeftWearing)
+            putExtra("isRightWearing", isRightWearing)
+            putExtra("ancMode", xiaomiAncMode)
+            putExtra("rawAnc", rawAnc)
+        }
+        sendBroadcast(intent)
+
+        try {
+            contentResolver.call(
+                Uri.parse("content://com.android.bluetooth.ble.app.headsetdata.provider"),
+                "updateAirpodsState",
+                mac,
+                null
+            )
+        } catch (_: Throwable) {
+        }
     }
 
     fun updateNoiseControlWidget() {
@@ -3384,6 +3467,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
+        sendXiaomiStateBroadcast(connected = false)
         destroyed = true
         BluetoothConnectionManager.aacpSocket?.let { finishAacpSession(it, "service destroyed") }
         routingState.reset()
