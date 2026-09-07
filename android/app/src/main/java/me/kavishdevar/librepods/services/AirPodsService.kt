@@ -122,7 +122,6 @@ import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_MANUFACTURER_NAME
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_MODEL_NAME
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_CASE_BATTERY
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_CASE_CHARGING
-import me.kavishdevar.librepods.utils.XiaomiBatteryIslandPublisher
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_CASE_ICON
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_CASE_LOW_BATTERY_THRESHOLD
 import me.kavishdevar.librepods.utils.SystemApisUtils.METADATA_UNTETHERED_LEFT_BATTERY
@@ -448,7 +447,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "lib exempt worked: ${isBluetoothSocketExempted()}")
-        XiaomiBatteryIslandPublisher.prepare(this)
 
         sharedPreferencesLogs = getSharedPreferences("packet_logs", MODE_PRIVATE)
 
@@ -776,7 +774,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
                 } else if (intent?.action == AirPodsNotifications.AIRPODS_DISCONNECTED) {
                     if (intent.hasExtra("aacp_session") && intent.getLongExtra("aacp_session", -1L) != aacpSessionId) return
-                    device?.address?.let { XiaomiBatteryIslandPublisher.disconnected(this@AirPodsService, it) }
                     device = null
 //                    isConnectedLocally = false
                     popupShown = false
@@ -944,15 +941,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             @SuppressLint("MissingPermission")
             override fun onBatteryInfoReceived(batteryInfo: ByteArray) {
                 batteryNotification.setBattery(batteryInfo)
-                val currentDevice = device
-                if (currentDevice != null) {
-                    XiaomiBatteryIslandPublisher.battery(
-                        this@AirPodsService,
-                        currentDevice.address,
-                        config.deviceName,
-                        batteryNotification.getBattery(),
-                    )
-                }
                 sendBroadcast(Intent(AirPodsNotifications.BATTERY_DATA).apply {
                     putParcelableArrayListExtra("data", ArrayList(batteryNotification.getBattery()))
                     setPackage(packageName)
@@ -2964,12 +2952,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                             attManager.readCharacteristic(ATTHandles.HEARING_AID)
                         }
 
-                        XiaomiBatteryIslandPublisher.connected(
-                            this@AirPodsService,
-                            device.address,
-                            config.deviceName,
-                        )
-
                         // Create AirPodsInstance from stored config if available
                         if (airpodsInstance == null && config.airpodsModelNumber.isNotEmpty()) {
                             val model =
@@ -3409,7 +3391,6 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         MediaController.resetRoutingState()
         pendingAudioResumeReceiver?.let { runCatching { unregisterReceiver(it) } }
         pendingAudioResumeReceiver = null
-        XiaomiBatteryIslandPublisher.clear(this)
         clearPacketLogs()
         Log.d(TAG, "Service stopped is being destroyed for some reason!")
 
