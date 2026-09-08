@@ -1,7 +1,6 @@
 package me.kavishdevar.librepods.utils
 
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.ContentProvider
@@ -23,7 +22,6 @@ import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.result.MethodData
-import java.lang.ref.WeakReference
 import java.lang.reflect.Method
 
 private const val TAG = "LibrePodsHook"
@@ -543,7 +541,7 @@ class KotlinModule: XposedModule() {
         }
 
         if (address != null) {
-            if (address.equals(xiaomiAirPodsMac, ignoreCase = true)) {
+            if (address.equals(xiaomiBattery?.address, ignoreCase = true)) {
                 return true
             }
         }
@@ -673,274 +671,117 @@ class KotlinModule: XposedModule() {
         }
     }
 
-    // State cache in com.xiaomi.bluetooth process
+    // One immutable snapshot prevents mixing addresses and battery values across broadcasts.
     @Volatile
-    private var xiaomiAirPodsMac: String? = null
-    @Volatile
-    private var xiaomiAirPodsName: String = "AirPods"
-    @Volatile
-    private var xiaomiConnected: Boolean = false
-    @Volatile
-    private var xiaomiLeftBattery: Int = -1
-    @Volatile
-    private var xiaomiRightBattery: Int = -1
-    @Volatile
-    private var xiaomiBoxBattery: Int = -1
-    @Volatile
-    private var xiaomiLeftCharging: Boolean = false
-    @Volatile
-    private var xiaomiRightCharging: Boolean = false
-    @Volatile
-    private var xiaomiBoxCharging: Boolean = false
-    @Volatile
-    private var xiaomiLeftWearing: Boolean = false
-    @Volatile
-    private var xiaomiRightWearing: Boolean = false
-    @Volatile
-    private var xiaomiAncMode: Int = 0
+    private var xiaomiBattery: XiaomiExactBattery? = null
     private var xiaomiReceiverRegistered = false
-
-
-    private data class AirPodsCachedState(
-        val mac: String,
-        val name: String,
-        val connected: Boolean,
-        val leftBattery: Int,
-        val rightBattery: Int,
-        val boxBattery: Int,
-        val isLeftCharging: Boolean,
-        val isRightCharging: Boolean,
-        val isBoxCharging: Boolean,
-        val isLeftWearing: Boolean,
-        val isRightWearing: Boolean,
-        val ancMode: Int
-    )
-
-    private fun getOrRefreshAirPodsState(): AirPodsCachedState? {
-        val mac = xiaomiAirPodsMac
-        if (mac != null && xiaomiLeftBattery >= 0) {
-            return AirPodsCachedState(
-                mac = mac,
-                name = xiaomiAirPodsName,
-                connected = xiaomiConnected,
-                leftBattery = xiaomiLeftBattery,
-                rightBattery = xiaomiRightBattery,
-                boxBattery = xiaomiBoxBattery,
-                isLeftCharging = xiaomiLeftCharging,
-                isRightCharging = xiaomiRightCharging,
-                isBoxCharging = xiaomiBoxCharging,
-                isLeftWearing = xiaomiLeftWearing,
-                isRightWearing = xiaomiRightWearing,
-                ancMode = xiaomiAncMode
-            )
-        }
-
-        try {
-            val remotePref = getRemotePreferences("me.kavishdevar.librepods")
-            val remoteMac = remotePref.getString("xiaomi_mac", null) ?: remotePref.getString("mac_address", null) ?: return null
-            val connected = remotePref.getBoolean("xiaomi_connected", false)
-            val left = remotePref.getInt("xiaomi_left_battery", -1)
-            val right = remotePref.getInt("xiaomi_right_battery", -1)
-            val box = remotePref.getInt("xiaomi_case_battery", -1)
-            val leftChg = remotePref.getBoolean("xiaomi_left_charging", false)
-            val rightChg = remotePref.getBoolean("xiaomi_right_charging", false)
-            val boxChg = remotePref.getBoolean("xiaomi_case_charging", false)
-            val leftWear = remotePref.getBoolean("xiaomi_left_wearing", false)
-            val rightWear = remotePref.getBoolean("xiaomi_right_wearing", false)
-            val anc = remotePref.getInt("xiaomi_anc_mode", 0)
-            val name = remotePref.getString("xiaomi_name", null) ?: remotePref.getString("name", "AirPods") ?: "AirPods"
-
-            return AirPodsCachedState(
-                mac = remoteMac,
-                name = name,
-                connected = connected,
-                leftBattery = left,
-                rightBattery = right,
-                boxBattery = box,
-                isLeftCharging = leftChg,
-                isRightCharging = rightChg,
-                isBoxCharging = boxChg,
-                isLeftWearing = leftWear,
-                isRightWearing = rightWear,
-                ancMode = anc
-            )
-        } catch (_: Throwable) {
-            return null
-        }
-    }
 
     private fun registerXiaomiBluetoothStateReceiver(context: Context) {
         if (xiaomiReceiverRegistered) return
-        xiaomiReceiverRegistered = true
         try {
-            val filter = IntentFilter("me.kavishdevar.librepods.AIRPODS_STATE_UPDATE")
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(c: Context?, intent: Intent?) {
-                    if (intent?.action == "me.kavishdevar.librepods.AIRPODS_STATE_UPDATE") {
-                        val mac = intent.getStringExtra("mac") ?: return
-                        xiaomiAirPodsMac = mac
-                        xiaomiAirPodsName = intent.getStringExtra("name") ?: "AirPods"
-                        xiaomiConnected = intent.getBooleanExtra("connected", true)
-                        xiaomiLeftBattery = intent.getIntExtra("leftBattery", -1)
-                        xiaomiRightBattery = intent.getIntExtra("rightBattery", -1)
-                        xiaomiBoxBattery = intent.getIntExtra("boxBattery", -1)
-                        xiaomiLeftCharging = intent.getBooleanExtra("isLeftCharging", false)
-                        xiaomiRightCharging = intent.getBooleanExtra("isRightCharging", false)
-                        xiaomiBoxCharging = intent.getBooleanExtra("isBoxCharging", false)
-                        xiaomiLeftWearing = intent.getBooleanExtra("isLeftWearing", false)
-                        xiaomiRightWearing = intent.getBooleanExtra("isRightWearing", false)
-                        xiaomiAncMode = intent.getIntExtra("ancMode", 0)
-
-                        log(Log.INFO, TAG, "Xiaomi Bluetooth received AIRPODS_STATE_UPDATE: mac=$mac left=$xiaomiLeftBattery right=$xiaomiRightBattery box=$xiaomiBoxBattery")
-
-                        c?.let { ctx ->
-                            try {
-                                val sp = ctx.getSharedPreferences("AirpodsModel", Context.MODE_PRIVATE)
-                                val chargingFlags = (if (xiaomiLeftCharging) 1 else 0) or
-                                        (if (xiaomiRightCharging) 2 else 0) or
-                                        (if (xiaomiBoxCharging) 4 else 0)
-                                val wearingFlags = (if (xiaomiRightWearing) 1 else 0) or
-                                        (if (xiaomiLeftWearing) 2 else 0)
-                                val stateStr = "$xiaomiLeftBattery|$xiaomiRightBattery|$xiaomiBoxBattery|$chargingFlags|$wearingFlags|$xiaomiAirPodsName"
-                                sp.edit()
-                                    .putString("$mac-state", stateStr)
-                                    .putString("$mac-connectState", if (xiaomiConnected) "2" else "0")
-                                    .putString("$mac-type", xiaomiAirPodsName)
-                                    .putString("$mac-wearType", "tws")
-                                    .apply()
-
-                                ctx.contentResolver.notifyChange(
-                                    Uri.parse("content://com.android.bluetooth.ble.app.headsetdata.provider/airpodsstate"),
-                                    null,
-                                    false
-                                )
-                            } catch (e: Throwable) {
-                                log(Log.WARN, TAG, "Failed to update AirpodsModel SP: ${e.message}")
-                            }
-                        }
+                    if (intent?.action != "me.kavishdevar.librepods.AIRPODS_STATE_UPDATE") return
+                    val mac = intent.getStringExtra("mac")?.takeIf { it.isNotBlank() } ?: return
+                    xiaomiBattery = XiaomiExactBattery(
+                        address = mac,
+                        connected = intent.getBooleanExtra("connected", false),
+                        left = intent.getIntExtra("leftBattery", -1),
+                        right = intent.getIntExtra("rightBattery", -1),
+                        case = intent.getIntExtra("boxBattery", -1),
+                    )
+                    // Never write AirpodsModel: its type, wearType and state are owned by Xiaomi.
+                    try {
+                        c?.contentResolver?.notifyChange(
+                            Uri.parse("content://com.android.bluetooth.ble.app.headsetdata.provider/airpodsstate"),
+                            null,
+                            false
+                        )
+                    } catch (e: Exception) {
+                        log(Log.WARN, TAG, "Failed to notify battery observers: ${e.message}")
                     }
                 }
             }
-            if (android.os.Build.VERSION.SDK_INT >= 33) {
-                context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-            } else {
-                context.registerReceiver(receiver, filter)
-            }
-            log(Log.INFO, TAG, "Registered AIRPODS_STATE_UPDATE receiver in com.xiaomi.bluetooth")
+            context.registerReceiver(receiver,
+                IntentFilter("me.kavishdevar.librepods.AIRPODS_STATE_UPDATE"),
+                Context.RECEIVER_EXPORTED)
+            xiaomiReceiverRegistered = true
+            log(Log.INFO, TAG, "Registered battery-only overlay receiver")
         } catch (e: Throwable) {
-            log(Log.WARN, TAG, "Failed to register receiver in com.xiaomi.bluetooth: ${e.message}")
+            log(Log.WARN, TAG, "Failed to register battery receiver: ${e.message}")
         }
     }
 
     private fun hookXiaomiBluetoothProvider(param: PackageLoadedParam) {
-        log(Log.INFO, TAG, "Installing Xiaomi Bluetooth Provider hooks")
-
         try {
             val providerClass = Class.forName(
                 "com.android.bluetooth.ble.app.headset.miuibluetoothprovider.MiuiBluetoothContentProvider",
-                false,
-                param.defaultClassLoader
+                false, param.defaultClassLoader
             )
-
-            val onCreateMethod = providerClass.declaredMethods.firstOrNull { it.name == "onCreate" && it.parameterTypes.isEmpty() }
-            if (onCreateMethod != null) {
-                hook(onCreateMethod).intercept { chain ->
+            providerClass.declaredMethods.firstOrNull {
+                it.name == "onCreate" && it.parameterTypes.isEmpty()
+            }?.let { method ->
+                hook(method).intercept { chain ->
                     val result = chain.proceed()
-                    val provider = chain.thisObject as? ContentProvider
-                    provider?.context?.let { ctx ->
-                        registerXiaomiBluetoothStateReceiver(ctx)
+                    (chain.thisObject as? ContentProvider)?.context?.let {
+                        registerXiaomiBluetoothStateReceiver(it)
                     }
                     result
                 }
-                log(Log.INFO, TAG, "Hooked MiuiBluetoothContentProvider#onCreate")
             }
-
-            val callMethods = providerClass.declaredMethods.filter { it.name == "call" }
-            callMethods.forEach { callMethod ->
-                hook(callMethod).intercept { chain ->
-                    val method = chain.args.getOrNull(if (chain.args.size == 4) 1 else 0) as? String
-                    val arg = chain.args.getOrNull(if (chain.args.size == 4) 2 else 1) as? String
-
-                    if (method == "getAirpodsState") {
-                        val state = getOrRefreshAirPodsState()
-                        if (state != null && (arg == null || isAirPodsAddress(arg) || state.mac.equals(arg, ignoreCase = true))) {
-                            log(Log.INFO, TAG, "MiuiBluetoothContentProvider#call getAirpodsState intercepted for $arg, returning exact state: left=${state.leftBattery} right=${state.rightBattery} box=${state.boxBattery}")
-                            val bundle = Bundle().apply {
-                                putString("device", state.mac)
-                                putString("connectState", if (state.connected) "2" else "0")
-                                putString("modelName", state.name)
-                                putString("wearType", "tws")
-                                putString("isLeftWearing", state.isLeftWearing.toString())
-                                putString("leftBattery", if (state.leftBattery >= 0) state.leftBattery.toString() else "-1")
-                                putString("isRightWearing", state.isRightWearing.toString())
-                                putString("rightBattery", if (state.rightBattery >= 0) state.rightBattery.toString() else "-1")
-                                putString("boxBattery", if (state.boxBattery >= 0) state.boxBattery.toString() else "-1")
-                                putString("isLeftCharging", state.isLeftCharging.toString())
-                                putString("isRightCharging", state.isRightCharging.toString())
-                                putString("isBoxCharging", state.isBoxCharging.toString())
-                            }
-                            return@intercept bundle
+            providerClass.declaredMethods.filter {
+                it.name == "call" && it.returnType == Bundle::class.java &&
+                    it.parameterTypes.size in 3..4
+            }.forEach { method ->
+                hook(method).intercept { chain ->
+                    // Preserve native permission checks, device selection and every metadata field.
+                    val original = chain.proceed()
+                    val offset = if (chain.args.size == 4) 1 else 0
+                    if (chain.args[offset] != "getAirpodsState" || original !is Bundle) {
+                        return@intercept original
+                    }
+                    val battery = xiaomiBattery ?: return@intercept original
+                    val requestedAddress = chain.args[offset + 1] as? String
+                    val returnedAddress = original.getString("device")
+                    if (!battery.matches(requestedAddress ?: returnedAddress) ||
+                        (!returnedAddress.isNullOrBlank() && !battery.matches(returnedAddress))) {
+                        return@intercept original
+                    }
+                    Bundle(original).apply {
+                        battery.fields().forEach { (key, value) ->
+                            if (containsKey(key)) putString(key, value)
                         }
                     }
-                    chain.proceed()
                 }
-                log(Log.INFO, TAG, "Hooked MiuiBluetoothContentProvider#call (${callMethod.parameterTypes.size} params)")
             }
+            log(Log.INFO, TAG, "Installed battery-only provider overlay (native metadata preserved)")
         } catch (e: Throwable) {
-            log(Log.WARN, TAG, "Failed to hook MiuiBluetoothContentProvider: ${e.message}")
+            log(Log.WARN, TAG, "Failed to hook Xiaomi battery provider: ${e.message}")
         }
 
         try {
-            val c1714jClass = try {
-                Class.forName("y0.j", false, param.defaultClassLoader)
-            } catch (_: Throwable) {
-                try {
-                    Class.forName("y0.C1714j", false, param.defaultClassLoader)
-                } catch (_: Throwable) {
-                    null
+            val owner = listOf("y0.j", "y0.C1714j").firstNotNullOfOrNull { name ->
+                runCatching { Class.forName(name, false, param.defaultClassLoader) }.getOrNull()
+            } ?: return
+            val method = owner.declaredMethods.firstOrNull {
+                it.name == "h" && it.returnType == Array<String>::class.java &&
+                    it.parameterTypes.contentEquals(arrayOf(String::class.java, Context::class.java))
+            } ?: return
+            hook(method).intercept { chain ->
+                val original = chain.proceed()
+                val battery = xiaomiBattery
+                if (battery == null || !battery.matches(chain.args[0] as? String) || original !is Array<*>) {
+                    return@intercept original
                 }
+                @Suppress("UNCHECKED_CAST")
+                battery.overlay(original as Array<String?>)
             }
-
-            if (c1714jClass != null) {
-                val hMethod = c1714jClass.declaredMethods.firstOrNull {
-                    it.name == "h" &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[0] == String::class.java &&
-                    Context::class.java.isAssignableFrom(it.parameterTypes[1])
-                }
-                if (hMethod != null) {
-                    hook(hMethod).intercept { chain ->
-                        val mac = chain.args[0] as? String
-                        val state = getOrRefreshAirPodsState()
-                        if (state != null && (mac == null || isAirPodsAddress(mac) || state.mac.equals(mac, ignoreCase = true))) {
-                            log(Log.INFO, TAG, "y0.j#h intercepted for $mac, returning exact state: left=${state.leftBattery} right=${state.rightBattery} box=${state.boxBattery}")
-                            return@intercept arrayOf(
-                                state.isLeftWearing.toString(),
-                                if (state.leftBattery >= 0) state.leftBattery.toString() else "-1",
-                                state.isRightWearing.toString(),
-                                if (state.rightBattery >= 0) state.rightBattery.toString() else "-1",
-                                if (state.boxBattery >= 0) state.boxBattery.toString() else "-1",
-                                state.isLeftCharging.toString(),
-                                state.isRightCharging.toString(),
-                                state.isBoxCharging.toString(),
-                                state.name,
-                                if (state.connected) "true" else "false"
-                            )
-                        }
-                        chain.proceed()
-                    }
-                    log(Log.INFO, TAG, "Hooked y0.j#h")
-                }
-            }
+            log(Log.INFO, TAG, "Installed battery-only y0.j#h overlay (model and flags preserved)")
         } catch (e: Throwable) {
-            log(Log.WARN, TAG, "Failed to hook y0.j#h: ${e.message}")
+            log(Log.WARN, TAG, "Failed to hook Xiaomi battery array: ${e.message}")
         }
     }
 
-    private fun isAirPodsAddress(mac: String?): Boolean {
-        if (mac == null) return false
-        return mac.equals(xiaomiAirPodsMac, ignoreCase = true)
-    }
 }
 
 
